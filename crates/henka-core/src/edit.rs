@@ -126,6 +126,36 @@ impl WorkspaceEdit {
     pub fn is_empty(&self) -> bool {
         self.files.iter().all(|f| f.edits.is_empty()) && self.file_ops.is_empty()
     }
+
+    /// Re-root every absolute path under `from_root` to the same relative
+    /// location under `to_root`, so an edit computed against one checkout can be
+    /// applied to a sibling working copy. Paths not under `from_root` (relative
+    /// paths, or absolute paths elsewhere such as JDK sources) are left as-is.
+    pub fn retarget(&mut self, from_root: &Path, to_root: &Path) {
+        for file in &mut self.files {
+            file.path = retarget_path(&file.path, from_root, to_root);
+        }
+        for op in &mut self.file_ops {
+            match op {
+                FileOperation::Create { path } | FileOperation::Delete { path } => {
+                    *path = retarget_path(path, from_root, to_root);
+                }
+                FileOperation::Rename { from, to } => {
+                    *from = retarget_path(from, from_root, to_root);
+                    *to = retarget_path(to, from_root, to_root);
+                }
+            }
+        }
+    }
+}
+
+/// Re-root `path` from `from_root` to `to_root` if it lies under `from_root`;
+/// otherwise return it unchanged.
+fn retarget_path(path: &Path, from_root: &Path, to_root: &Path) -> PathBuf {
+    match path.strip_prefix(from_root) {
+        Ok(rel) => to_root.join(rel),
+        Err(_) => path.to_path_buf(),
+    }
 }
 
 /// The unified diff for a single file produced by [`EditApplier::preview`].
@@ -530,6 +560,75 @@ mod tests {
             std::fs::read_to_string(&new).unwrap(),
             "class Salutation {}\n"
         );
+    }
+
+    #[test]
+    fn retarget_rewrites_file_and_op_paths() {
+        let mut edit = WorkspaceEdit {
+            encoding: PositionEncoding::Utf16,
+            files: vec![FileEdit {
+                path: PathBuf::from("/base/src/A.java"),
+                edits: vec![],
+            }],
+            file_ops: vec![FileOperation::Rename {
+                from: PathBuf::from("/base/src/Old.java"),
+                to: PathBuf::from("/base/src/New.java"),
+            }],
+        };
+        edit.retarget(Path::new("/base"), Path::new("/wt"));
+        assert_eq!(edit.files[0].path, PathBuf::from("/wt/src/A.java"));
+        match &edit.file_ops[0] {
+            FileOperation::Rename { from, to } => {
+                assert_eq!(from, &PathBuf::from("/wt/src/Old.java"));
+                assert_eq!(to, &PathBuf::from("/wt/src/New.java"));
+            }
+            other => panic!("unexpected op {other:?}"),
+        }
+    }
+
+    #[test]
+    fn retarget_leaves_foreign_paths() {
+        let mut edit = WorkspaceEdit {
+            encoding: PositionEncoding::Utf16,
+            files: vec![FileEdit {
+                path: PathBuf::from("/usr/lib/jvm/src/java/lang/String.java"),
+                edits: vec![],
+            }],
+            file_ops: vec![],
+        };
+        edit.retarget(Path::new("/base"), Path::new("/wt"));
+        assert_eq!(
+            edit.files[0].path,
+            PathBuf::from("/usr/lib/jvm/src/java/lang/String.java"),
+            "paths outside the source root are untouched"
+        );
+    }
+
+    #[test]
+    fn retarget_then_apply_writes_to_target() {
+        // The session checkout (`base`) does not even exist on disk; the edit
+        // must land in the target working copy after retargeting.
+        let base = PathBuf::from("/nonexistent-base-checkout");
+        let to = tempfile::tempdir().unwrap();
+        let target_file = to.path().join("a.txt");
+        std::fs::write(&target_file, "hello world\n").unwrap();
+
+        let mut edit = WorkspaceEdit {
+            encoding: PositionEncoding::Utf16,
+            files: vec![FileEdit {
+                path: base.join("a.txt"),
+                edits: vec![TextEdit {
+                    range: Range::new(pos(0, 6), pos(0, 11)),
+                    new_text: "there".into(),
+                }],
+            }],
+            file_ops: vec![],
+        };
+        edit.retarget(&base, to.path());
+        let applied = EditApplier::apply(&edit, to.path()).unwrap();
+
+        assert_eq!(applied.changed_files, vec![PathBuf::from("a.txt")]);
+        assert_eq!(std::fs::read_to_string(&target_file).unwrap(), "hello there\n");
     }
 
     #[test]
