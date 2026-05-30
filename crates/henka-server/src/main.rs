@@ -31,7 +31,10 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = Transport::Stdio)]
     transport: Transport,
 
-    /// Address to bind when `--transport http`.
+    /// Address to bind when `--transport http`. Defaults to loopback; pass
+    /// `0.0.0.0:<port>` to listen on all interfaces. The server is
+    /// unauthenticated, so binding beyond loopback exposes every registered
+    /// project to anyone who can reach the port.
     #[arg(long, default_value = "127.0.0.1:8181")]
     bind: String,
 
