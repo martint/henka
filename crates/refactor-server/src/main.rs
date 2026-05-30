@@ -5,17 +5,36 @@ mod ops;
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use refactor_core::{ProjectRegistry, ProviderRegistry, default_config_path};
 use rmcp::ServiceExt;
 use rmcp::transport::stdio;
+use rmcp::transport::streamable_http_server::StreamableHttpService;
+use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 
 use crate::mcp::RefactorMcp;
+
+/// How clients connect to the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Transport {
+    /// Standard input/output, for a single local client.
+    Stdio,
+    /// Streamable HTTP, for a hosted multi-client service.
+    Http,
+}
 
 /// Multi-tenant MCP server for code refactorings.
 #[derive(Debug, Parser)]
 #[command(name = "refactor-server", version, about)]
 struct Cli {
+    /// How clients connect.
+    #[arg(long, value_enum, default_value_t = Transport::Stdio)]
+    transport: Transport,
+
+    /// Address to bind when `--transport http`.
+    #[arg(long, default_value = "127.0.0.1:8181")]
+    bind: String,
+
     /// Path to the project registry file. Defaults to
     /// `$XDG_CONFIG_HOME/refactor-mcp/projects.toml`.
     #[arg(long)]
@@ -34,8 +53,28 @@ async fn main() -> anyhow::Result<()> {
 
     let providers = build_providers();
     let handler = RefactorMcp::new(registry, providers);
-    let service = handler.serve(stdio()).await?;
-    service.waiting().await?;
+
+    match cli.transport {
+        Transport::Stdio => {
+            let service = handler.serve(stdio()).await?;
+            service.waiting().await?;
+        }
+        Transport::Http => serve_http(handler, &cli.bind).await?,
+    }
+    Ok(())
+}
+
+/// Serve the handler over streamable HTTP at `/mcp`, one MCP session per client.
+async fn serve_http(handler: RefactorMcp, bind: &str) -> anyhow::Result<()> {
+    let service = StreamableHttpService::new(
+        move || Ok(handler.clone()),
+        std::sync::Arc::new(LocalSessionManager::default()),
+        Default::default(),
+    );
+    let app = axum::Router::new().nest_service("/mcp", service);
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    tracing::info!(%bind, "serving MCP over streamable HTTP at /mcp");
+    axum::serve(listener, app).await?;
     Ok(())
 }
 

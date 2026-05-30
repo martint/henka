@@ -14,6 +14,7 @@ refactor-core = { workspace = true }
 refactor-lang-java = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }
+axum = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

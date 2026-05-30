@@ -32,8 +32,15 @@ tokio = { version = "1", features = [
 ] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rmcp = { version = "0.8", features = ["server", "transport-io", "macros", "schemars"] }
+rmcp = { version = "0.8", features = [
+    "server",
+    "transport-io",
+    "transport-streamable-http-server",
+    "macros",
+    "schemars",
+] }
 schemars = "1"
+axum = "0.8"
 async-trait = "0.1"
 similar = { version = "2", features = ["text", "unicode"] }
 walkdir = "2"
