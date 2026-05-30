@@ -9,7 +9,7 @@ use clap::{Parser, ValueEnum};
 use henka_core::{ProjectRegistry, ProviderRegistry, default_config_path};
 use rmcp::ServiceExt;
 use rmcp::transport::stdio;
-use rmcp::transport::streamable_http_server::StreamableHttpService;
+use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 
 use crate::mcp::HenkaMcp;
@@ -42,6 +42,14 @@ struct Cli {
     /// `$XDG_CONFIG_HOME/henka/projects.toml`.
     #[arg(long)]
     config: Option<PathBuf>,
+
+    /// Additional `Host` header value to accept on `--transport http`, beyond
+    /// the loopback defaults (localhost, 127.0.0.1, ::1). The HTTP transport
+    /// rejects other hosts as a DNS-rebinding guard; add the host your client
+    /// connects as — e.g. `--allowed-host host.docker.internal` for a client in
+    /// a container. A value without a port matches any port. Repeatable.
+    #[arg(long = "allowed-host", value_name = "HOST")]
+    allowed_hosts: Vec<String>,
 }
 
 #[tokio::main]
@@ -62,17 +70,29 @@ async fn main() -> anyhow::Result<()> {
             let service = handler.serve(stdio()).await?;
             service.waiting().await?;
         }
-        Transport::Http => serve_http(handler, &cli.bind).await?,
+        Transport::Http => serve_http(handler, &cli.bind, &cli.allowed_hosts).await?,
     }
     Ok(())
 }
 
 /// Serve the handler over streamable HTTP at `/mcp`, one MCP session per client.
-async fn serve_http(handler: HenkaMcp, bind: &str) -> anyhow::Result<()> {
+async fn serve_http(
+    handler: HenkaMcp,
+    bind: &str,
+    allowed_hosts: &[String],
+) -> anyhow::Result<()> {
+    // Keep rmcp's loopback-only DNS-rebinding guard, extended with any hosts the
+    // operator explicitly trusts.
+    let mut config = StreamableHttpServerConfig::default();
+    config.allowed_hosts.extend(allowed_hosts.iter().cloned());
+    if !allowed_hosts.is_empty() {
+        tracing::info!(allowed_hosts = ?config.allowed_hosts, "accepting additional Host headers");
+    }
+
     let service = StreamableHttpService::new(
         move || Ok(handler.clone()),
         std::sync::Arc::new(LocalSessionManager::default()),
-        Default::default(),
+        config,
     );
     let app = axum::Router::new().nest_service("/mcp", service);
     let listener = tokio::net::TcpListener::bind(bind).await?;
