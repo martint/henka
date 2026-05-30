@@ -1,32 +1,17 @@
 //! Locating, launching, and driving an Eclipse JDT language server.
+//!
+//! The generic document lifecycle (open/index/overlay/sync) lives in
+//! [`henka_lsp::LspSession`]; this module adds the jdtls-specific launch, the
+//! `initialize` handshake, and the import-readiness wait.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use henka_core::provider::RequestGuard;
-use henka_lsp::LspClient;
+use henka_lsp::{LspClient, LspSession, path_to_file_uri};
 use serde_json::{Value, json};
 use tokio::process::Command;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::broadcast;
 use tokio::time::Duration;
-
-/// Upper bound on source files opened to index a loose-file project.
-const MAX_INDEX_FILES: usize = 2000;
-
-/// Directories not worth opening when indexing a project.
-const SKIP_DIRS: &[&str] = &[
-    ".git",
-    ".jj",
-    ".data",
-    "config",
-    "target",
-    "build",
-    "out",
-    "node_modules",
-    ".gradle",
-];
 
 use crate::error::{JavaError, Result};
 
@@ -170,33 +155,10 @@ pub fn java_executable() -> String {
     "java".to_string()
 }
 
-/// Files presented on top of the base index by an overlay, recorded so the
-/// overlay can be restored after the request.
-#[derive(Default)]
-struct OverlayState {
-    /// Base-abs paths that were already open and got a `didChange` to the
-    /// working copy's content; restored by changing them back to base content.
-    changed: HashSet<PathBuf>,
-    /// Base-abs paths opened solely for the overlay; restored by closing them.
-    opened: HashSet<PathBuf>,
-}
-
-/// A running, initialized jdtls session for one project.
+/// A running, initialized jdtls session for one project, wrapping the generic
+/// [`LspSession`] with jdtls-specific startup.
 pub struct JdtlsSession {
-    client: LspClient,
-    root: PathBuf,
-    opened: Mutex<HashSet<PathBuf>>,
-    indexed: AtomicBool,
-    bundles: Vec<String>,
-    /// Serializes requests so a working-copy overlay stays coherent.
-    request: Arc<Mutex<()>>,
-    /// Files currently overlaid on the base index.
-    overlay: Mutex<OverlayState>,
-    /// Set while an overlay is active, so a leaked overlay (a request that did
-    /// not restore) is cleared at the start of the next request.
-    overlay_dirty: AtomicBool,
-    /// Monotonic version counter for `didChange` notifications.
-    doc_version: AtomicU32,
+    session: LspSession,
 }
 
 impl JdtlsSession {
@@ -239,358 +201,131 @@ impl JdtlsSession {
             .arg(data_dir);
 
         let client = LspClient::spawn(command)?;
-        let session = Self {
-            client,
-            root: root.to_path_buf(),
-            opened: Mutex::new(HashSet::new()),
-            indexed: AtomicBool::new(false),
-            bundles: bundles.iter().map(|p| p.display().to_string()).collect(),
-            request: Arc::new(Mutex::new(())),
-            overlay: Mutex::new(OverlayState::default()),
-            overlay_dirty: AtomicBool::new(false),
-            doc_version: AtomicU32::new(1),
-        };
         // Subscribe before initializing so the readiness signal isn't missed.
-        let mut status = session.client.subscribe();
-        session.initialize().await?;
+        let mut status = client.subscribe();
+        let bundles: Vec<String> = bundles.iter().map(|p| p.display().to_string()).collect();
+        initialize(&client, root, &bundles).await?;
         wait_for_ready(&mut status).await;
-        Ok(session)
+        Ok(Self {
+            session: LspSession::new(client, root, "java", &["java"]),
+        })
     }
 
     /// The underlying LSP client.
     pub fn client(&self) -> &LspClient {
-        &self.client
+        self.session.client()
     }
 
     /// The project root.
     pub fn root(&self) -> &Path {
-        &self.root
+        self.session.root()
     }
 
     /// The `file://` URI for a path, resolved against the project root.
     pub fn uri_for(&self, path: &Path) -> String {
-        let abs = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.root.join(path)
-        };
-        path_to_file_uri(&abs)
+        self.session.uri_for(path)
     }
 
-    /// Open a document in the server if it isn't already, returning its URI.
+    /// Open a document if it isn't already, returning its URI.
     pub async fn ensure_open(&self, path: &Path) -> Result<String> {
-        let abs = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.root.join(path)
-        };
-        let uri = path_to_file_uri(&abs);
-
-        {
-            let opened = self.opened.lock().await;
-            if opened.contains(&abs) {
-                return Ok(uri);
-            }
-        }
-
-        let text = std::fs::read_to_string(&abs)?;
-        self.did_open(&uri, &text).await?;
-        self.opened.lock().await.insert(abs);
-        Ok(uri)
+        Ok(self.session.ensure_open(path).await?)
     }
 
-    /// Notify the server that `uri` is open with the given `text`.
-    async fn did_open(&self, uri: &str, text: &str) -> Result<()> {
-        self.client
-            .notify(
-                "textDocument/didOpen",
-                json!({
-                    "textDocument": {
-                        "uri": uri,
-                        "languageId": "java",
-                        "version": 1,
-                        "text": text,
-                    }
-                }),
-            )
-            .await?;
-        Ok(())
-    }
-
-    /// Notify the server of a full-document change of `uri` to `text`.
-    async fn did_change_full(&self, uri: &str, text: &str) -> Result<()> {
-        let version = self.doc_version.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-        self.client
-            .notify(
-                "textDocument/didChange",
-                json!({
-                    "textDocument": { "uri": uri, "version": version },
-                    "contentChanges": [{ "text": text }],
-                }),
-            )
-            .await?;
-        Ok(())
-    }
-
-    /// Notify the server that `uri` is closed (server re-reads it from disk).
-    async fn did_close(&self, uri: &str) -> Result<()> {
-        self.client
-            .notify(
-                "textDocument/didClose",
-                json!({ "textDocument": { "uri": uri } }),
-            )
-            .await?;
-        Ok(())
-    }
-
-    /// Ensure the project's sources are resolved before an operation reads from
-    /// them, done once per session.
-    ///
-    /// A build-tool project (Maven/Gradle) is fully indexed by jdtls's import,
-    /// so this is a safety net; but a loose-file ("invisible") project — or one
-    /// whose import failed (e.g. offline) — resolves files only as they are
-    /// opened. Opening the project's sources up front makes cross-file results
-    /// (rename, find-usages) complete in those cases too.
+    /// Open the project's sources once so cross-file results are complete.
     pub async fn ensure_indexed(&self) -> Result<()> {
-        if self.indexed.swap(true, Ordering::SeqCst) {
-            return Ok(());
-        }
-        let files = collect_java_files(&self.root);
-        self.open_and_reconcile(&files).await
+        Ok(self.session.ensure_indexed().await?)
     }
 
-    /// Open the given files (if not already open) and wait for jdtls to
-    /// reconcile each newly-opened one, signalled by a `publishDiagnostics`
-    /// notification. This makes the server resolve those files before a
-    /// subsequent request (e.g. a rename) reads from them.
+    /// Open the given files and wait for the server to reconcile them.
     pub async fn open_and_reconcile(&self, paths: &[PathBuf]) -> Result<()> {
-        // Subscribe before opening so reconcile signals aren't missed.
-        let mut events = self.client.subscribe();
-
-        let mut pending: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for path in paths {
-            let abs = if path.is_absolute() {
-                path.clone()
-            } else {
-                self.root.join(path)
-            };
-            let already_open = self.opened.lock().await.contains(&abs);
-            let uri = self.ensure_open(path).await?;
-            if !already_open {
-                pending.insert(uri);
-            }
-        }
-        self.drain_until_reconciled(&mut events, pending).await;
-        Ok(())
+        Ok(self.session.open_and_reconcile(paths).await?)
     }
 
-    /// Wait until jdtls has published diagnostics for each URI in `pending`
-    /// (signalling it reconciled that document), bounded by a timeout.
-    /// `events` must have been subscribed before the documents were sent.
-    async fn drain_until_reconciled(
-        &self,
-        events: &mut broadcast::Receiver<(String, Value)>,
-        mut pending: HashSet<String>,
-    ) {
-        if pending.is_empty() {
-            return;
-        }
-        let _ = tokio::time::timeout(Duration::from_secs(15), async {
-            while !pending.is_empty() {
-                match events.recv().await {
-                    Ok((method, params)) if method == "textDocument/publishDiagnostics" => {
-                        if let Some(uri) = params.get("uri").and_then(Value::as_str) {
-                            pending.remove(uri);
-                        }
-                    }
-                    Ok(_) => continue,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        })
-        .await;
-    }
-
-    /// Sync files that changed on disk (after an edit was applied) into the
-    /// server: any that were open are closed so jdtls re-reads them from disk,
-    /// and a watched-files change is announced so the index updates.
+    /// Sync files changed on disk back into the server.
     pub async fn sync_changed_impl(&self, changed: &[PathBuf]) {
-        let mut to_close = Vec::new();
-        let mut watch = Vec::new();
-        {
-            let mut opened = self.opened.lock().await;
-            for path in changed {
-                let abs = if path.is_absolute() {
-                    path.clone()
-                } else {
-                    self.root.join(path)
-                };
-                let uri = path_to_file_uri(&abs);
-                if opened.remove(&abs) {
-                    to_close.push(uri.clone());
-                }
-                watch.push(json!({ "uri": uri, "type": 2 })); // 2 = Changed
-            }
-        }
-        for uri in to_close {
-            let _ = self
-                .client
-                .notify(
-                    "textDocument/didClose",
-                    json!({ "textDocument": { "uri": uri } }),
-                )
-                .await;
-        }
-        let _ = self
-            .client
-            .notify(
-                "workspace/didChangeWatchedFiles",
-                json!({ "changes": watch }),
-            )
-            .await;
+        self.session.sync_changed(changed).await;
     }
 
-    /// Acquire the per-session request lock, held for one request's duration so
-    /// a working-copy overlay can't be observed by a concurrent request. Also
-    /// clears any overlay leaked by a prior request that failed to restore.
+    /// Begin one request, serializing on the session and clearing leaked overlays.
     pub async fn begin_request_impl(&self) -> RequestGuard {
-        let guard = self.request.clone().lock_owned().await;
-        if self.overlay_dirty.load(Ordering::Acquire) {
-            self.restore_overlay_impl().await;
-        }
-        RequestGuard::holding(Box::new(guard))
+        self.session.begin_request().await
     }
 
-    /// Present `workspace_root`'s modified `delta` files (relative paths) on top
-    /// of the base index, so an operation sees that working copy's content. The
-    /// content is addressed under the base root's URIs, so the warm index is
-    /// reused. A no-op when the working copy *is* the base checkout.
+    /// Overlay a working copy's content onto the shared index.
     pub async fn overlay_workspace_impl(
         &self,
         workspace_root: &Path,
         delta: &[PathBuf],
     ) -> Result<()> {
-        if workspace_root == self.root {
-            return Ok(());
-        }
-        // Subscribe before sending so reconcile signals aren't missed.
-        let mut events = self.client.subscribe();
-        let mut pending: HashSet<String> = HashSet::new();
-        for rel in delta {
-            if rel.extension().and_then(|e| e.to_str()) != Some("java") {
-                continue;
-            }
-            let Ok(content) = std::fs::read_to_string(workspace_root.join(rel)) else {
-                continue;
-            };
-            let base_abs = self.root.join(rel);
-            let uri = path_to_file_uri(&base_abs);
-            let already_open = self.opened.lock().await.contains(&base_abs);
-            if already_open {
-                self.did_change_full(&uri, &content).await?;
-                self.overlay.lock().await.changed.insert(base_abs);
-            } else {
-                self.did_open(&uri, &content).await?;
-                self.opened.lock().await.insert(base_abs.clone());
-                self.overlay.lock().await.opened.insert(base_abs);
-            }
-            self.overlay_dirty.store(true, Ordering::Release);
-            pending.insert(uri);
-        }
-        self.drain_until_reconciled(&mut events, pending).await;
-        Ok(())
+        Ok(self.session.overlay_workspace(workspace_root, delta).await?)
     }
 
-    /// Undo the active overlay: change overlaid documents back to their base
-    /// content, close any opened solely for the overlay, and clear the record.
-    /// Idempotent — safe to call to clear a leaked overlay.
+    /// Restore the base index view after an overlay.
     pub async fn restore_overlay_impl(&self) {
-        let state = std::mem::take(&mut *self.overlay.lock().await);
-        if state.changed.is_empty() && state.opened.is_empty() {
-            self.overlay_dirty.store(false, Ordering::Release);
-            return;
-        }
-        let mut events = self.client.subscribe();
-        let mut pending: HashSet<String> = HashSet::new();
-        for base_abs in &state.changed {
-            if let Ok(base_content) = std::fs::read_to_string(base_abs) {
-                let uri = path_to_file_uri(base_abs);
-                let _ = self.did_change_full(&uri, &base_content).await;
-                pending.insert(uri);
-            }
-        }
-        for base_abs in &state.opened {
-            let uri = path_to_file_uri(base_abs);
-            let _ = self.did_close(&uri).await;
-            self.opened.lock().await.remove(base_abs);
-        }
-        self.drain_until_reconciled(&mut events, pending).await;
-        self.overlay_dirty.store(false, Ordering::Release);
+        self.session.restore_overlay().await;
     }
 
     /// Shut the server down.
     pub async fn shutdown(&self) -> Result<()> {
-        self.client.shutdown().await?;
-        Ok(())
+        Ok(self.session.shutdown().await?)
     }
+}
 
-    /// Send `initialize`/`initialized`, advertising the JDT extended client
-    /// capabilities that unlock its command-based refactorings.
-    async fn initialize(&self) -> Result<()> {
-        let root_uri = path_to_file_uri(&self.root);
-        let mut init_options = json!({
-            "extendedClientCapabilities": { "classFileContentsSupport": true }
-        });
-        if !self.bundles.is_empty() {
-            init_options["bundles"] = json!(self.bundles);
-        }
-        let params = json!({
-            "processId": std::process::id(),
-            "rootUri": root_uri,
-            "capabilities": {
-                "workspace": {
-                    "applyEdit": true,
-                    "workspaceEdit": { "documentChanges": true, "resourceOperations": ["create", "rename", "delete"] },
-                    "configuration": true,
-                    "executeCommand": { "dynamicRegistration": true },
-                    "symbol": { "dynamicRegistration": true },
-                },
-                "textDocument": {
-                    "synchronization": { "didSave": true, "dynamicRegistration": true },
-                    "rename": { "dynamicRegistration": true, "prepareSupport": true },
-                    "references": { "dynamicRegistration": true },
-                    "definition": { "dynamicRegistration": true },
-                    "implementation": { "dynamicRegistration": true },
-                    "documentSymbol": { "dynamicRegistration": true, "hierarchicalDocumentSymbolSupport": true },
-                    "callHierarchy": { "dynamicRegistration": true },
-                    "typeHierarchy": { "dynamicRegistration": true },
-                    "codeAction": {
-                        "dynamicRegistration": true,
-                        "codeActionLiteralSupport": {
-                            "codeActionKind": {
-                                "valueSet": ["", "quickfix", "refactor", "refactor.extract", "refactor.inline", "refactor.rewrite", "source", "source.organizeImports"]
-                            }
-                        },
-                        "resolveSupport": { "properties": ["edit"] }
-                    }
-                }
+/// Send `initialize`/`initialized`, advertising the JDT extended client
+/// capabilities that unlock its command-based refactorings.
+async fn initialize(client: &LspClient, root: &Path, bundles: &[String]) -> Result<()> {
+    let root_uri = path_to_file_uri(root);
+    let mut init_options = json!({
+        "extendedClientCapabilities": { "classFileContentsSupport": true }
+    });
+    if !bundles.is_empty() {
+        init_options["bundles"] = json!(bundles);
+    }
+    let params = json!({
+        "processId": std::process::id(),
+        "rootUri": root_uri,
+        "capabilities": {
+            "workspace": {
+                "applyEdit": true,
+                "workspaceEdit": { "documentChanges": true, "resourceOperations": ["create", "rename", "delete"] },
+                "configuration": true,
+                "executeCommand": { "dynamicRegistration": true },
+                "symbol": { "dynamicRegistration": true },
             },
-            // Deliberately do NOT advertise the "advanced" refactoring
-            // capabilities (advancedExtractRefactoringSupport, executeClient
-            // CommandSupport, …). Those make jdtls delegate refactoring UI to
-            // the client via client-side commands; without them, jdtls computes
-            // the refactoring itself and returns the edit inline on the code
-            // action, which is what a headless client needs. The parameterized
-            // refactorings (change-signature, move) instead go through our own
-            // delegate-command bundle, loaded via `bundles` below.
-            "initializationOptions": init_options
-        });
+            "textDocument": {
+                "synchronization": { "didSave": true, "dynamicRegistration": true },
+                "rename": { "dynamicRegistration": true, "prepareSupport": true },
+                "references": { "dynamicRegistration": true },
+                "definition": { "dynamicRegistration": true },
+                "implementation": { "dynamicRegistration": true },
+                "documentSymbol": { "dynamicRegistration": true, "hierarchicalDocumentSymbolSupport": true },
+                "callHierarchy": { "dynamicRegistration": true },
+                "typeHierarchy": { "dynamicRegistration": true },
+                "codeAction": {
+                    "dynamicRegistration": true,
+                    "codeActionLiteralSupport": {
+                        "codeActionKind": {
+                            "valueSet": ["", "quickfix", "refactor", "refactor.extract", "refactor.inline", "refactor.rewrite", "source", "source.organizeImports"]
+                        }
+                    },
+                    "resolveSupport": { "properties": ["edit"] }
+                }
+            }
+        },
+        // Deliberately do NOT advertise the "advanced" refactoring
+        // capabilities (advancedExtractRefactoringSupport, executeClient
+        // CommandSupport, …). Those make jdtls delegate refactoring UI to
+        // the client via client-side commands; without them, jdtls computes
+        // the refactoring itself and returns the edit inline on the code
+        // action, which is what a headless client needs. The parameterized
+        // refactorings (change-signature, move) instead go through our own
+        // delegate-command bundle, loaded via `bundles` below.
+        "initializationOptions": init_options
+    });
 
-        let _: Value = self.client.request("initialize", params).await?;
-        self.client.notify("initialized", json!({})).await?;
-        Ok(())
-    }
+    let _: Value = client.request("initialize", params).await?;
+    client.notify("initialized", json!({})).await?;
+    Ok(())
 }
 
 /// How long to wait for jdtls to finish importing the project before serving
@@ -623,52 +358,6 @@ async fn wait_for_ready(status: &mut broadcast::Receiver<(String, Value)>) {
     if waited.is_err() {
         tracing::warn!("timed out waiting for jdtls to become ready; proceeding");
     }
-}
-
-/// Convert an absolute path to a `file://` URI, percent-encoding the few
-/// characters that matter for typical source paths.
-fn path_to_file_uri(path: &Path) -> String {
-    let mut encoded = String::from("file://");
-    for ch in path.display().to_string().chars() {
-        match ch {
-            ' ' => encoded.push_str("%20"),
-            '#' => encoded.push_str("%23"),
-            '?' => encoded.push_str("%3F"),
-            other => encoded.push(other),
-        }
-    }
-    encoded
-}
-
-/// Collect up to [`MAX_INDEX_FILES`] `.java` files under `root`, skipping build
-/// and VCS directories.
-fn collect_java_files(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            if out.len() >= MAX_INDEX_FILES {
-                return out;
-            }
-            let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_dir() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if !SKIP_DIRS.contains(&name.as_ref()) {
-                    stack.push(path);
-                }
-            } else if path.extension().is_some_and(|e| e == "java") {
-                out.push(path);
-            }
-        }
-    }
-    out
 }
 
 /// Recursively copy a directory tree.
