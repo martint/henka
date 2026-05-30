@@ -46,6 +46,33 @@ pub enum Error {
     #[error("could not serialize registry config: {0}")]
     ConfigWrite(#[from] toml::ser::Error),
 
+    /// A position in an edit lies outside the target file's contents.
+    #[error("position {line}:{character} is out of range in {path}")]
+    PositionOutOfRange {
+        /// File the position referred to.
+        path: PathBuf,
+        /// Zero-based line.
+        line: u32,
+        /// Zero-based character offset.
+        character: u32,
+    },
+
+    /// Two edits to the same file overlap and cannot both be applied.
+    #[error("overlapping edits in {0}")]
+    OverlappingEdits(PathBuf),
+
+    /// A requested operation is not available for the project.
+    #[error("operation `{0}` is not available for this project")]
+    OperationNotAvailable(String),
+
+    /// The requested target shape does not match what the operation expects.
+    #[error("{0}")]
+    InvalidTarget(String),
+
+    /// A language backend failed.
+    #[error("language backend error: {0}")]
+    Backend(String),
+
     /// An I/O error.
     #[error(transparent)]
     Io(#[from] std::io::Error),

@@ -1,11 +1,12 @@
 //! The Refactor MCP server binary.
 
 mod mcp;
+mod ops;
 
 use std::path::PathBuf;
 
 use clap::Parser;
-use refactor_core::{ProjectRegistry, default_config_path};
+use refactor_core::{ProjectRegistry, ProviderRegistry, default_config_path};
 use rmcp::ServiceExt;
 use rmcp::transport::stdio;
 
@@ -31,10 +32,17 @@ async fn main() -> anyhow::Result<()> {
     let registry = ProjectRegistry::load(&config_path)?;
     tracing::info!(projects = registry.len(), "registry loaded");
 
-    let handler = RefactorMcp::new(registry);
+    let providers = build_providers();
+    let handler = RefactorMcp::new(registry, providers);
     let service = handler.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+/// Assemble the language providers. The Java provider (and its operations) is
+/// added in a later phase; until then the catalog is empty.
+fn build_providers() -> ProviderRegistry {
+    ProviderRegistry::new()
 }
 
 /// Initialize tracing to stderr — stdout is reserved for the MCP stdio channel.

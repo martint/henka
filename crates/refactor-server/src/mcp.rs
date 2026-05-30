@@ -1,13 +1,17 @@
-//! The MCP server handler: tenancy tools and the skill resource.
+//! The MCP server handler: tenancy tools, the dynamic operation catalog, and
+//! the skill resource.
 //!
 //! Tools are dispatched manually (rather than via the `#[tool]` macros) because
-//! the refactoring catalog is dynamic — driven by the registered language
-//! providers in later phases. The tenancy tools here are the static core of
-//! that same dispatch.
+//! the operation catalog is dynamic — driven by the registered language
+//! providers. The tenancy and discovery tools are the static core of that same
+//! dispatch; every catalog operation is surfaced as its own tool.
 
 use std::sync::Arc;
 
-use refactor_core::{Error as CoreError, Project, ProjectRegistry};
+use refactor_core::operation::{OperationCtx, OperationOutcome, OperationRequest};
+use refactor_core::{
+    EditApplier, Error as CoreError, OperationRegistry, Project, ProjectRegistry, ProviderRegistry,
+};
 use rmcp::model::{
     Annotated, CallToolRequestParam, CallToolResult, Content, Implementation,
     InitializeRequestParam, InitializeResult, ListResourcesResult, ListToolsResult,
@@ -19,8 +23,10 @@ use rmcp::{ErrorData as McpError, RoleServer, ServerHandler};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use tokio::sync::RwLock;
+
+use crate::ops;
 
 /// The skill resource: a written refactoring workflow, served over MCP and
 /// embedded at build time so the server stays a single self-contained binary.
@@ -34,19 +40,26 @@ type JsonObject = Map<String, Value>;
 #[derive(Clone)]
 pub struct RefactorMcp {
     registry: Arc<RwLock<ProjectRegistry>>,
+    providers: Arc<ProviderRegistry>,
+    operations: Arc<OperationRegistry>,
 }
 
 impl RefactorMcp {
-    /// Build a handler over the given registry.
-    pub fn new(registry: ProjectRegistry) -> Self {
+    /// Build a handler over the given project registry and language providers.
+    /// The operation catalog is assembled from the providers' contributions.
+    pub fn new(registry: ProjectRegistry, providers: ProviderRegistry) -> Self {
+        let mut operations = OperationRegistry::new();
+        operations.extend(providers.operations());
         Self {
             registry: Arc::new(RwLock::new(registry)),
+            providers: Arc::new(providers),
+            operations: Arc::new(operations),
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Tool parameter types
+// Tool parameter types (tenancy / discovery)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -66,6 +79,12 @@ struct ProjectIdParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct ListOperationsParams {
+    /// The id of a registered project to list operations for.
+    project: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct NoParams {}
 
 // ---------------------------------------------------------------------------
@@ -73,13 +92,13 @@ struct NoParams {}
 // ---------------------------------------------------------------------------
 
 impl RefactorMcp {
-    /// The tenancy tools always present on the server. The refactoring catalog
-    /// (added in later phases) is appended to this list.
+    /// The full tool list: tenancy + discovery tools, plus one tool per
+    /// operation in the catalog.
     fn tools(&self) -> Vec<Tool> {
-        vec![
+        let mut tools = vec![
             Tool::new(
                 "register_project",
-                "Register a local source tree as a project so it can be refactored. Detects the \
+                "Register a local source tree as a project so it can be operated on. Detects the \
                  project's languages and persists the registration across restarts.",
                 schema::<RegisterProjectParams>(),
             ),
@@ -98,7 +117,20 @@ impl RefactorMcp {
                 "Report a registered project's root and detected languages.",
                 schema::<ProjectIdParams>(),
             ),
-        ]
+            Tool::new(
+                "list_operations",
+                "List the operations (refactorings, structural replace, semantic queries) \
+                 available for a project, each with its kind, target, and parameters.",
+                schema::<ListOperationsParams>(),
+            ),
+        ];
+        tools.extend(
+            self.operations
+                .descriptors()
+                .iter()
+                .map(ops::operation_tool),
+        );
+        tools
     }
 
     async fn handle_call(&self, request: CallToolRequestParam) -> Result<CallToolResult, McpError> {
@@ -131,10 +163,80 @@ impl RefactorMcp {
                 let project = reg.get(&p.id).map_err(into_mcp)?;
                 ok_json(project)
             }
-            other => Err(McpError::invalid_params(
-                format!("unknown tool: `{other}`"),
-                None,
-            )),
+            "list_operations" => {
+                let p: ListOperationsParams = parse_args(request.arguments)?;
+                let reg = self.registry.read().await;
+                let project = reg.get(&p.project).map_err(into_mcp)?;
+                ok_json(&self.operations.descriptors_for(project))
+            }
+            name => self.dispatch_operation(name, request.arguments).await,
+        }
+    }
+
+    /// Run a catalog operation: resolve the project and operation, build the
+    /// request, run it, and either return the query result or preview/apply the
+    /// edit.
+    async fn dispatch_operation(
+        &self,
+        name: &str,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = arguments.unwrap_or_default();
+        let project_id = ops::project_id(&args)?;
+
+        let project: Project = {
+            let reg = self.registry.read().await;
+            reg.get(&project_id).map_err(into_mcp)?.clone()
+        };
+
+        let operation = self
+            .operations
+            .resolve(name, &project.languages)
+            .map_err(|_| {
+                McpError::invalid_params(
+                    format!("unknown tool or operation `{name}` for project `{project_id}`"),
+                    None,
+                )
+            })?;
+        let descriptor = operation.descriptor();
+
+        let target = ops::parse_target(&args, descriptor.target)?;
+        let params = ops::operation_params(&args);
+
+        let language = project
+            .languages
+            .iter()
+            .copied()
+            .find(|&l| descriptor.applies_to(l))
+            .ok_or_else(|| {
+                McpError::invalid_params(
+                    format!("operation `{name}` does not apply to this project's languages"),
+                    None,
+                )
+            })?;
+        let provider = self.providers.get(language).ok_or_else(|| {
+            McpError::internal_error(format!("no provider registered for `{language}`"), None)
+        })?;
+        let session = provider.session(&project).await.map_err(into_mcp)?;
+
+        let ctx = OperationCtx {
+            project: &project,
+            session,
+        };
+        let req = OperationRequest { target, params };
+        let outcome = operation.run(&ctx, &req).await.map_err(into_mcp)?;
+
+        match outcome {
+            OperationOutcome::Query(value) => ok_json(&value),
+            OperationOutcome::Edit(edit) => {
+                if ops::dry_run(&args) {
+                    let files = EditApplier::preview(&edit, &project.root).map_err(into_mcp)?;
+                    ok_json(&json!({ "dry_run": true, "files": files }))
+                } else {
+                    let applied = EditApplier::apply(&edit, &project.root).map_err(into_mcp)?;
+                    ok_json(&json!({ "dry_run": false, "applied": applied }))
+                }
+            }
         }
     }
 }
@@ -157,13 +259,13 @@ impl ServerHandler for RefactorMcp {
                 ..Implementation::from_build_env()
             },
             instructions: Some(
-                "Multi-tenant code refactoring server. One server hosts many projects; pass the \
-                 project `id` on every refactoring call. Register a source tree with \
-                 `register_project`, see what is registered with `list_projects`, and discover \
-                 the refactorings available for a project with `list_refactorings`. Every \
-                 refactoring supports a `dry_run` flag that returns a diff without touching disk. \
-                 Before refactoring, read the resource `skill://refactor/refactoring` for the \
-                 full workflow."
+                "Multi-tenant server for semantics-aware code operations. One server hosts many \
+                 projects; pass the project `id` on every operation. Register a source tree with \
+                 `register_project`, then `list_operations` to see what a project supports: \
+                 refactorings and structural replace (edits), plus semantic queries like \
+                 find-usages and go-to-definition. Prefer a semantic query over text search. \
+                 Edit operations default to a preview (a diff); pass `dry_run: false` to apply. \
+                 Read the resource `skill://refactor/refactoring` for the full workflow."
                     .into(),
             ),
         }
@@ -211,8 +313,9 @@ impl ServerHandler for RefactorMcp {
             name: "refactoring".into(),
             title: Some("Code refactoring workflow".into()),
             description: Some(
-                "How to use this server: register a project, discover its refactorings, preview \
-                 with dry_run, then apply."
+                "How to use this server: register a project, discover its operations, prefer \
+                 semantic queries over text search, and preview edits with dry_run before \
+                 applying."
                     .into(),
             ),
             mime_type: Some("text/markdown".into()),
@@ -241,7 +344,7 @@ impl ServerHandler for RefactorMcp {
             }),
             other => Err(McpError::resource_not_found(
                 "resource not found",
-                Some(serde_json::json!({ "uri": other })),
+                Some(json!({ "uri": other })),
             )),
         }
     }
@@ -282,9 +385,227 @@ fn into_mcp(err: CoreError) -> McpError {
         | CoreError::InvalidProjectId(_)
         | CoreError::PathNotFound(_)
         | CoreError::NotADirectory(_)
-        | CoreError::NoLanguageDetected(_) => McpError::invalid_params(err.to_string(), None),
-        CoreError::ConfigRead { .. } | CoreError::ConfigWrite(_) | CoreError::Io(_) => {
-            McpError::internal_error(err.to_string(), None)
+        | CoreError::NoLanguageDetected(_)
+        | CoreError::OperationNotAvailable(_)
+        | CoreError::InvalidTarget(_)
+        | CoreError::PositionOutOfRange { .. }
+        | CoreError::OverlappingEdits(_) => McpError::invalid_params(err.to_string(), None),
+        CoreError::Backend(_)
+        | CoreError::ConfigRead { .. }
+        | CoreError::ConfigWrite(_)
+        | CoreError::Io(_) => McpError::internal_error(err.to_string(), None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::any::Any;
+    use std::path::Path;
+
+    use async_trait::async_trait;
+    use refactor_core::operation::{
+        Operation, OperationCtx, OperationDescriptor, OperationKind, OperationOutcome,
+        OperationRequest, Target, TargetKind,
+    };
+    use refactor_core::{
+        FileEdit, Language, LanguageProvider, LanguageSession, PositionEncoding, Range, Result,
+        TextEdit, WorkspaceEdit,
+    };
+
+    use super::*;
+
+    /// Inserts `text` at the target position.
+    struct InsertOp;
+
+    #[async_trait]
+    impl Operation for InsertOp {
+        fn descriptor(&self) -> OperationDescriptor {
+            OperationDescriptor {
+                id: "insert-text".into(),
+                title: "Insert text".into(),
+                description: "Insert text at a position".into(),
+                kind: OperationKind::Edit,
+                languages: vec![Language::Java],
+                target: TargetKind::Position,
+                params_schema: json!({
+                    "type": "object",
+                    "properties": { "text": { "type": "string" } },
+                    "required": ["text"],
+                }),
+            }
         }
+
+        async fn run(
+            &self,
+            _ctx: &OperationCtx<'_>,
+            req: &OperationRequest,
+        ) -> Result<OperationOutcome> {
+            let text = req
+                .params
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let (file, position) = match &req.target {
+                Target::Position { file, position } => (file.clone(), *position),
+                _ => return Err(CoreError::InvalidTarget("expected a position".into())),
+            };
+            Ok(OperationOutcome::Edit(WorkspaceEdit {
+                encoding: PositionEncoding::Utf16,
+                files: vec![FileEdit {
+                    path: file,
+                    edits: vec![TextEdit {
+                        range: Range::new(position, position),
+                        new_text: text,
+                    }],
+                }],
+            }))
+        }
+    }
+
+    /// Echoes the target back as a query result.
+    struct EchoQuery;
+
+    #[async_trait]
+    impl Operation for EchoQuery {
+        fn descriptor(&self) -> OperationDescriptor {
+            OperationDescriptor {
+                id: "echo".into(),
+                title: "Echo".into(),
+                description: "Echo the target".into(),
+                kind: OperationKind::Query,
+                languages: vec![Language::Java],
+                target: TargetKind::Position,
+                params_schema: json!({ "type": "object", "properties": {} }),
+            }
+        }
+
+        async fn run(
+            &self,
+            _ctx: &OperationCtx<'_>,
+            req: &OperationRequest,
+        ) -> Result<OperationOutcome> {
+            let line = match &req.target {
+                Target::Position { position, .. } => position.line,
+                _ => 0,
+            };
+            Ok(OperationOutcome::Query(json!({ "line": line })))
+        }
+    }
+
+    struct MockSession;
+    impl LanguageSession for MockSession {
+        fn language(&self) -> Language {
+            Language::Java
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    struct MockProvider;
+    #[async_trait]
+    impl LanguageProvider for MockProvider {
+        fn language(&self) -> Language {
+            Language::Java
+        }
+        fn operations(&self) -> Vec<Arc<dyn Operation>> {
+            vec![Arc::new(InsertOp), Arc::new(EchoQuery)]
+        }
+        async fn session(&self, _project: &Project) -> Result<Arc<dyn LanguageSession>> {
+            Ok(Arc::new(MockSession))
+        }
+    }
+
+    /// Build a handler over a fresh Java project containing `Main.java`.
+    fn handler_with_project(dir: &Path) -> (RefactorMcp, std::path::PathBuf) {
+        let cfg = dir.join("projects.toml");
+        let root = dir.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("pom.xml"), "<project/>").unwrap();
+        std::fs::write(root.join("Main.java"), "hello\n").unwrap();
+
+        let mut registry = ProjectRegistry::load(&cfg).unwrap();
+        registry.register(Some("p".into()), &root).unwrap();
+
+        let mut providers = ProviderRegistry::new();
+        providers.register(Arc::new(MockProvider));
+
+        (RefactorMcp::new(registry, providers), root)
+    }
+
+    fn args(value: Value) -> Option<JsonObject> {
+        value.as_object().cloned()
+    }
+
+    fn call(name: &str, arguments: Option<JsonObject>) -> CallToolRequestParam {
+        CallToolRequestParam {
+            name: name.to_string().into(),
+            arguments,
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_lists_operation_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mcp, _) = handler_with_project(dir.path());
+        let names: Vec<String> = mcp.tools().iter().map(|t| t.name.to_string()).collect();
+        assert!(names.contains(&"insert-text".to_string()));
+        assert!(names.contains(&"echo".to_string()));
+        assert!(names.contains(&"list_operations".to_string()));
+    }
+
+    #[tokio::test]
+    async fn edit_previews_then_applies() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mcp, root) = handler_with_project(dir.path());
+        let main = root.join("Main.java");
+
+        // Preview (default dry_run): file must be untouched.
+        let preview = mcp
+            .handle_call(call(
+                "insert-text",
+                args(json!({ "project": "p", "file": "Main.java", "line": 0, "character": 0, "text": "X" })),
+            ))
+            .await
+            .unwrap();
+        assert_ne!(preview.is_error, Some(true));
+        assert_eq!(std::fs::read_to_string(&main).unwrap(), "hello\n");
+
+        // Apply.
+        let applied = mcp
+            .handle_call(call(
+                "insert-text",
+                args(json!({ "project": "p", "file": "Main.java", "line": 0, "character": 0, "text": "X", "dry_run": false })),
+            ))
+            .await
+            .unwrap();
+        assert_ne!(applied.is_error, Some(true));
+        assert_eq!(std::fs::read_to_string(&main).unwrap(), "Xhello\n");
+    }
+
+    #[tokio::test]
+    async fn query_runs_without_dry_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mcp, _) = handler_with_project(dir.path());
+        let res = mcp
+            .handle_call(call(
+                "echo",
+                args(json!({ "project": "p", "file": "Main.java", "line": 3, "character": 0 })),
+            ))
+            .await
+            .unwrap();
+        assert_ne!(res.is_error, Some(true));
+    }
+
+    #[tokio::test]
+    async fn unknown_operation_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mcp, _) = handler_with_project(dir.path());
+        let err = mcp
+            .handle_call(call("nonexistent", args(json!({ "project": "p" }))))
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("unknown tool or operation"));
     }
 }

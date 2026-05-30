@@ -33,6 +33,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rmcp = { version = "0.8", features = ["server", "transport-io", "macros", "schemars"] }
 schemars = "1"
 async-trait = "0.1"
+similar = { version = "2", features = ["text", "unicode"] }
 walkdir = "2"
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
