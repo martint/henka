@@ -6,11 +6,13 @@
 //! providers. The tenancy and discovery tools are the static core of that same
 //! dispatch; every catalog operation is surfaced as its own tool.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use henka_core::operation::{OperationCtx, OperationOutcome, OperationRequest};
 use henka_core::{
-    EditApplier, Error as CoreError, OperationRegistry, Project, ProjectRegistry, ProviderRegistry,
+    EditApplier, Error as CoreError, FileOperation, Language, OperationRegistry, Project,
+    ProjectRegistry, ProviderRegistry, Target, WorkspaceEdit, repo_identity, working_copy_delta,
 };
 use rmcp::model::{
     Annotated, CallToolRequestParams, CallToolResult, Content, Implementation,
@@ -206,11 +208,19 @@ impl HenkaMcp {
         let target = ops::parse_target(&args, descriptor.target)?;
         let params = ops::operation_params(&args);
 
-        let language = project
-            .languages
-            .iter()
-            .copied()
-            .find(|&l| descriptor.applies_to(l))
+        // Route to the provider for the target file's language when a project
+        // spans more than one; fall back to the first applicable language.
+        let language = target
+            .file()
+            .and_then(|f| Language::from_path(f))
+            .filter(|&l| project.has_language(l) && descriptor.applies_to(l))
+            .or_else(|| {
+                project
+                    .languages
+                    .iter()
+                    .copied()
+                    .find(|&l| descriptor.applies_to(l))
+            })
             .ok_or_else(|| {
                 McpError::invalid_params(
                     format!("operation `{name}` does not apply to this project's languages"),
@@ -220,30 +230,129 @@ impl HenkaMcp {
         let provider = self.providers.get(language).ok_or_else(|| {
             McpError::internal_error(format!("no provider registered for `{language}`"), None)
         })?;
+
+        // Resolve and validate the working copy the edits should land in.
+        let workspace = resolve_workspace(&args, &target, &project);
+        ensure_same_repo(&workspace, &project.root)?;
+
         let session = provider.session(&project).await.map_err(into_mcp)?;
+        // Serialize the request and overlay the working copy's content onto the
+        // shared index, so the operation sees that working copy. The guard and
+        // overlay are released/restored before returning.
+        let _guard = session.begin_request().await;
+        let on_base = session.root() == Some(workspace.as_path());
+        if !on_base {
+            let delta = working_copy_delta(&workspace);
+            session
+                .overlay_workspace(&workspace, &delta)
+                .await
+                .map_err(into_mcp)?;
+        }
 
         let ctx = OperationCtx {
             project: &project,
-            session,
+            session: Arc::clone(&session),
         };
         let req = OperationRequest { target, params };
-        let outcome = operation.run(&ctx, &req).await.map_err(into_mcp)?;
+        let outcome = operation.run(&ctx, &req).await;
+
+        // Always restore the base index view, even if the operation failed.
+        session.restore_overlay().await;
+        let outcome = outcome.map_err(into_mcp)?;
 
         match outcome {
             OperationOutcome::Query(value) => ok_json(&value),
-            OperationOutcome::Edit(edit) => {
+            OperationOutcome::Edit(mut edit) => {
+                // Retarget the edit (computed against the session's checkout)
+                // onto the requested working copy, then refuse to escape it.
+                if let Some(root) = session.root() {
+                    edit.retarget(root, &workspace);
+                }
+                reject_edits_outside(&edit, &workspace)?;
                 if ops::dry_run(&args) {
-                    let files = EditApplier::preview(&edit, &project.root).map_err(into_mcp)?;
+                    let files = EditApplier::preview(&edit, &workspace).map_err(into_mcp)?;
                     ok_json(&json!({ "dry_run": true, "files": files }))
                 } else {
-                    let applied = EditApplier::apply(&edit, &project.root).map_err(into_mcp)?;
-                    // Keep the session's view current so later operations in
-                    // this session see the applied changes.
-                    ctx.session.sync_changed(&applied.changed_files).await;
+                    let applied = EditApplier::apply(&edit, &workspace).map_err(into_mcp)?;
+                    // When editing the session's own checkout, keep its view
+                    // current so later operations see the applied changes.
+                    if on_base {
+                        session.sync_changed(&applied.changed_files).await;
+                    }
                     ok_json(&json!({ "dry_run": false, "applied": applied }))
                 }
             }
         }
+    }
+}
+
+/// Resolve the working copy a request's edits should be applied to: an explicit
+/// `workspace`, else the working copy containing an absolute target `file`, else
+/// the project root.
+fn resolve_workspace(args: &JsonObject, target: &Target, project: &Project) -> PathBuf {
+    if let Some(ws) = ops::workspace(args) {
+        return ws;
+    }
+    if let Some(file) = target.file()
+        && file.is_absolute()
+        && let Some(root) = working_copy_root_containing(file)
+    {
+        return root;
+    }
+    project.root.clone()
+}
+
+/// The nearest ancestor directory of `file` that is a working-copy root (one
+/// holding a `.git` or `.jj` entry).
+fn working_copy_root_containing(file: &Path) -> Option<PathBuf> {
+    file.ancestors()
+        .skip(1)
+        .find(|dir| dir.join(".git").exists() || dir.join(".jj").exists())
+        .map(Path::to_path_buf)
+}
+
+/// Validate that `workspace` is a working copy of the same repository as
+/// `project_root` (or, with no VCS, is the project root itself).
+fn ensure_same_repo(workspace: &Path, project_root: &Path) -> Result<(), McpError> {
+    let same = match (repo_identity(workspace), repo_identity(project_root)) {
+        (Some(a), Some(b)) => a == b,
+        (None, None) => canonical(workspace) == canonical(project_root),
+        _ => false,
+    };
+    if same {
+        Ok(())
+    } else {
+        Err(McpError::invalid_params(
+            format!(
+                "workspace `{}` is not a working copy of the project",
+                workspace.display()
+            ),
+            None,
+        ))
+    }
+}
+
+/// Canonicalize a path, falling back to the path itself when it can't be.
+fn canonical(p: &Path) -> PathBuf {
+    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Reject an edit that, after retargeting, would write to an absolute path
+/// outside `workspace` (e.g. a backend emitting edits to dependency sources).
+fn reject_edits_outside(edit: &WorkspaceEdit, workspace: &Path) -> Result<(), McpError> {
+    let inside = |p: &Path| !p.is_absolute() || p.starts_with(workspace);
+    let ok = edit.files.iter().all(|f| inside(&f.path))
+        && edit.file_ops.iter().all(|op| match op {
+            FileOperation::Create { path } | FileOperation::Delete { path } => inside(path),
+            FileOperation::Rename { from, to } => inside(from) && inside(to),
+        });
+    if ok {
+        Ok(())
+    } else {
+        Err(McpError::invalid_params(
+            "refactoring would edit files outside the workspace",
+            None,
+        ))
     }
 }
 
@@ -602,6 +711,65 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(res.is_error, Some(true));
+    }
+
+    #[tokio::test]
+    async fn workspace_is_stripped_from_operation_params() {
+        // The `workspace` envelope field must not leak into operation params.
+        let params = ops::operation_params(
+            &args(json!({ "project": "p", "workspace": "/some/wt", "file": "A.java", "text": "x" }))
+                .unwrap(),
+        );
+        assert!(params.get("workspace").is_none());
+        assert_eq!(params.get("text").and_then(Value::as_str), Some("x"));
+    }
+
+    #[tokio::test]
+    async fn rejects_workspace_outside_project_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mcp, _) = handler_with_project(dir.path());
+        // An unrelated directory is not a working copy of the project.
+        let foreign = dir.path().join("foreign");
+        std::fs::create_dir_all(&foreign).unwrap();
+
+        let err = mcp
+            .handle_call(call(
+                "insert-text",
+                args(json!({
+                    "project": "p", "workspace": foreign.to_str().unwrap(),
+                    "file": "Main.java", "line": 0, "character": 0, "text": "X"
+                })),
+            ))
+            .await
+            .unwrap_err();
+        assert!(
+            err.message.contains("not a working copy"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn applies_edit_to_named_workspace() {
+        // An explicit `workspace` equal to the project root is accepted and the
+        // edit lands there. (Cross-working-copy retargeting needs a real repo
+        // and is covered by the jdtls integration tests.)
+        let dir = tempfile::tempdir().unwrap();
+        let (mcp, root) = handler_with_project(dir.path());
+        let main = root.join("Main.java");
+
+        let applied = mcp
+            .handle_call(call(
+                "insert-text",
+                args(json!({
+                    "project": "p", "workspace": root.to_str().unwrap(),
+                    "file": "Main.java", "line": 0, "character": 0, "text": "X", "dry_run": false
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_ne!(applied.is_error, Some(true));
+        assert_eq!(std::fs::read_to_string(&main).unwrap(), "Xhello\n");
     }
 
     #[tokio::test]

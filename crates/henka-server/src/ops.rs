@@ -7,6 +7,7 @@
 //! envelope fields out of the call arguments and leaves the rest as the
 //! operation's parameters.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use henka_core::operation::{OperationDescriptor, OperationKind, TargetKind};
@@ -21,6 +22,7 @@ pub type JsonObject = Map<String, Value>;
 /// Envelope field names that are not part of an operation's own parameters.
 const ENVELOPE_KEYS: &[&str] = &[
     "project",
+    "workspace",
     "file",
     "line",
     "character",
@@ -57,6 +59,15 @@ fn build_input_schema(descriptor: &OperationDescriptor) -> Arc<JsonObject> {
         json!({ "type": "string", "description": "Id of the registered project to act on." }),
     );
     required.push("project".into());
+
+    props.insert(
+        "workspace".into(),
+        json!({
+            "type": "string",
+            "description": "Path to the working copy (git worktree / jj workspace) to apply edits to. \
+                            Defaults to the project root, or the working copy containing an absolute `file`."
+        }),
+    );
 
     let file_prop = json!({ "type": "string", "description": "File path, relative to the project root unless absolute." });
     let line_prop = |what: &str| json!({ "type": "integer", "minimum": 0, "description": format!("Zero-based {what} line.") });
@@ -130,6 +141,14 @@ pub fn project_id(args: &JsonObject) -> Result<String, McpError> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| McpError::invalid_params("missing required `project`", None))
+}
+
+/// The explicit `workspace` path from call arguments, if given.
+pub fn workspace(args: &JsonObject) -> Option<PathBuf> {
+    args.get("workspace")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Whether the call requested a preview (defaults to true for edits).

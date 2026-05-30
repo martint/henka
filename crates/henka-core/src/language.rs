@@ -24,6 +24,16 @@ impl Language {
             Language::Java => "java",
         }
     }
+
+    /// The language of a source file, inferred from its extension, if
+    /// recognized. Used to route an operation on a file to the right backend
+    /// when a project (repository) spans more than one language.
+    pub fn from_path(path: &Path) -> Option<Language> {
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("java") => Some(Language::Java),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for Language {
@@ -125,6 +135,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("pom.xml"), "<project/>").unwrap();
         assert_eq!(detect_languages(dir.path()), vec![Language::Java]);
+    }
+
+    #[test]
+    fn from_path_maps_known_and_unknown_extensions() {
+        assert_eq!(
+            Language::from_path(Path::new("src/Main.java")),
+            Some(Language::Java)
+        );
+        assert_eq!(Language::from_path(Path::new("README.md")), None);
+        assert_eq!(Language::from_path(Path::new("noext")), None);
     }
 
     #[test]
