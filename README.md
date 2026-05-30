@@ -8,19 +8,7 @@ Structured, semantics-aware code refactorings for AI agents, spoken over [MCP](h
 
 The full specification is in [`docs/SPEC.md`](docs/SPEC.md).
 
-## Try it
-
-Build the server and the Java language server, then drive a real rename end to end — no MCP client needed:
-
-```sh
-cargo xtask jdtls          # one-time: fetch jdtls + the refactoring bundle
-cargo build                # build the server
-python3 scripts/smoke-mcp.py
-```
-
-The smoke client spins up a throwaway Java project, registers it, lists the available operations, and runs a `rename` — first as a preview diff, then applied — printing each result.
-
-## Run it for your repo
+## Build and run
 
 Build the release binary (this also fetches the Java language server and builds the delegate-command bundle it needs):
 
