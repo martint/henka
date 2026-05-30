@@ -2,8 +2,10 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use henka_core::provider::RequestGuard;
 use henka_lsp::LspClient;
 use serde_json::{Value, json};
 use tokio::process::Command;
@@ -168,6 +170,17 @@ pub fn java_executable() -> String {
     "java".to_string()
 }
 
+/// Files presented on top of the base index by an overlay, recorded so the
+/// overlay can be restored after the request.
+#[derive(Default)]
+struct OverlayState {
+    /// Base-abs paths that were already open and got a `didChange` to the
+    /// working copy's content; restored by changing them back to base content.
+    changed: HashSet<PathBuf>,
+    /// Base-abs paths opened solely for the overlay; restored by closing them.
+    opened: HashSet<PathBuf>,
+}
+
 /// A running, initialized jdtls session for one project.
 pub struct JdtlsSession {
     client: LspClient,
@@ -175,6 +188,15 @@ pub struct JdtlsSession {
     opened: Mutex<HashSet<PathBuf>>,
     indexed: AtomicBool,
     bundles: Vec<String>,
+    /// Serializes requests so a working-copy overlay stays coherent.
+    request: Arc<Mutex<()>>,
+    /// Files currently overlaid on the base index.
+    overlay: Mutex<OverlayState>,
+    /// Set while an overlay is active, so a leaked overlay (a request that did
+    /// not restore) is cleared at the start of the next request.
+    overlay_dirty: AtomicBool,
+    /// Monotonic version counter for `didChange` notifications.
+    doc_version: AtomicU32,
 }
 
 impl JdtlsSession {
@@ -223,6 +245,10 @@ impl JdtlsSession {
             opened: Mutex::new(HashSet::new()),
             indexed: AtomicBool::new(false),
             bundles: bundles.iter().map(|p| p.display().to_string()).collect(),
+            request: Arc::new(Mutex::new(())),
+            overlay: Mutex::new(OverlayState::default()),
+            overlay_dirty: AtomicBool::new(false),
+            doc_version: AtomicU32::new(1),
         };
         // Subscribe before initializing so the readiness signal isn't missed.
         let mut status = session.client.subscribe();
@@ -268,6 +294,13 @@ impl JdtlsSession {
         }
 
         let text = std::fs::read_to_string(&abs)?;
+        self.did_open(&uri, &text).await?;
+        self.opened.lock().await.insert(abs);
+        Ok(uri)
+    }
+
+    /// Notify the server that `uri` is open with the given `text`.
+    async fn did_open(&self, uri: &str, text: &str) -> Result<()> {
         self.client
             .notify(
                 "textDocument/didOpen",
@@ -281,8 +314,33 @@ impl JdtlsSession {
                 }),
             )
             .await?;
-        self.opened.lock().await.insert(abs);
-        Ok(uri)
+        Ok(())
+    }
+
+    /// Notify the server of a full-document change of `uri` to `text`.
+    async fn did_change_full(&self, uri: &str, text: &str) -> Result<()> {
+        let version = self.doc_version.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+        self.client
+            .notify(
+                "textDocument/didChange",
+                json!({
+                    "textDocument": { "uri": uri, "version": version },
+                    "contentChanges": [{ "text": text }],
+                }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Notify the server that `uri` is closed (server re-reads it from disk).
+    async fn did_close(&self, uri: &str) -> Result<()> {
+        self.client
+            .notify(
+                "textDocument/didClose",
+                json!({ "textDocument": { "uri": uri } }),
+            )
+            .await?;
+        Ok(())
     }
 
     /// Ensure the project's sources are resolved before an operation reads from
@@ -322,10 +380,21 @@ impl JdtlsSession {
                 pending.insert(uri);
             }
         }
-        if pending.is_empty() {
-            return Ok(());
-        }
+        self.drain_until_reconciled(&mut events, pending).await;
+        Ok(())
+    }
 
+    /// Wait until jdtls has published diagnostics for each URI in `pending`
+    /// (signalling it reconciled that document), bounded by a timeout.
+    /// `events` must have been subscribed before the documents were sent.
+    async fn drain_until_reconciled(
+        &self,
+        events: &mut broadcast::Receiver<(String, Value)>,
+        mut pending: HashSet<String>,
+    ) {
+        if pending.is_empty() {
+            return;
+        }
         let _ = tokio::time::timeout(Duration::from_secs(15), async {
             while !pending.is_empty() {
                 match events.recv().await {
@@ -341,7 +410,6 @@ impl JdtlsSession {
             }
         })
         .await;
-        Ok(())
     }
 
     /// Sync files that changed on disk (after an edit was applied) into the
@@ -381,6 +449,84 @@ impl JdtlsSession {
                 json!({ "changes": watch }),
             )
             .await;
+    }
+
+    /// Acquire the per-session request lock, held for one request's duration so
+    /// a working-copy overlay can't be observed by a concurrent request. Also
+    /// clears any overlay leaked by a prior request that failed to restore.
+    pub async fn begin_request_impl(&self) -> RequestGuard {
+        let guard = self.request.clone().lock_owned().await;
+        if self.overlay_dirty.load(Ordering::Acquire) {
+            self.restore_overlay_impl().await;
+        }
+        RequestGuard::holding(Box::new(guard))
+    }
+
+    /// Present `workspace_root`'s modified `delta` files (relative paths) on top
+    /// of the base index, so an operation sees that working copy's content. The
+    /// content is addressed under the base root's URIs, so the warm index is
+    /// reused. A no-op when the working copy *is* the base checkout.
+    pub async fn overlay_workspace_impl(
+        &self,
+        workspace_root: &Path,
+        delta: &[PathBuf],
+    ) -> Result<()> {
+        if workspace_root == self.root {
+            return Ok(());
+        }
+        // Subscribe before sending so reconcile signals aren't missed.
+        let mut events = self.client.subscribe();
+        let mut pending: HashSet<String> = HashSet::new();
+        for rel in delta {
+            if rel.extension().and_then(|e| e.to_str()) != Some("java") {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(workspace_root.join(rel)) else {
+                continue;
+            };
+            let base_abs = self.root.join(rel);
+            let uri = path_to_file_uri(&base_abs);
+            let already_open = self.opened.lock().await.contains(&base_abs);
+            if already_open {
+                self.did_change_full(&uri, &content).await?;
+                self.overlay.lock().await.changed.insert(base_abs);
+            } else {
+                self.did_open(&uri, &content).await?;
+                self.opened.lock().await.insert(base_abs.clone());
+                self.overlay.lock().await.opened.insert(base_abs);
+            }
+            self.overlay_dirty.store(true, Ordering::Release);
+            pending.insert(uri);
+        }
+        self.drain_until_reconciled(&mut events, pending).await;
+        Ok(())
+    }
+
+    /// Undo the active overlay: change overlaid documents back to their base
+    /// content, close any opened solely for the overlay, and clear the record.
+    /// Idempotent — safe to call to clear a leaked overlay.
+    pub async fn restore_overlay_impl(&self) {
+        let state = std::mem::take(&mut *self.overlay.lock().await);
+        if state.changed.is_empty() && state.opened.is_empty() {
+            self.overlay_dirty.store(false, Ordering::Release);
+            return;
+        }
+        let mut events = self.client.subscribe();
+        let mut pending: HashSet<String> = HashSet::new();
+        for base_abs in &state.changed {
+            if let Ok(base_content) = std::fs::read_to_string(base_abs) {
+                let uri = path_to_file_uri(base_abs);
+                let _ = self.did_change_full(&uri, &base_content).await;
+                pending.insert(uri);
+            }
+        }
+        for base_abs in &state.opened {
+            let uri = path_to_file_uri(base_abs);
+            let _ = self.did_close(&uri).await;
+            self.opened.lock().await.remove(base_abs);
+        }
+        self.drain_until_reconciled(&mut events, pending).await;
+        self.overlay_dirty.store(false, Ordering::Release);
     }
 
     /// Shut the server down.

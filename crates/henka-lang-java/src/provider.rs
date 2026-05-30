@@ -3,12 +3,12 @@
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use henka_core::operation::Operation;
-use henka_core::provider::{LanguageProvider, LanguageSession};
+use henka_core::provider::{LanguageProvider, LanguageSession, RequestGuard};
 use henka_core::{Error as CoreError, Language, Project, Result as CoreResult, detect_revision};
 use tokio::sync::Mutex;
 
@@ -28,6 +28,24 @@ impl LanguageSession for JdtlsSession {
 
     async fn sync_changed(&self, changed: &[PathBuf]) {
         self.sync_changed_impl(changed).await;
+    }
+
+    fn root(&self) -> Option<&Path> {
+        Some(JdtlsSession::root(self))
+    }
+
+    async fn begin_request(&self) -> RequestGuard {
+        self.begin_request_impl().await
+    }
+
+    async fn overlay_workspace(&self, workspace_root: &Path, delta: &[PathBuf]) -> CoreResult<()> {
+        self.overlay_workspace_impl(workspace_root, delta)
+            .await
+            .map_err(|e| CoreError::Backend(e.to_string()))
+    }
+
+    async fn restore_overlay(&self) {
+        self.restore_overlay_impl().await;
     }
 }
 
