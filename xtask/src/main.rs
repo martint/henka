@@ -61,7 +61,7 @@ fn cmd_build() -> Result<(), String> {
         step("jdtls and bundle already present, skipping");
     }
 
-    step("building henka-server (release)");
+    step("building henka (release)");
     cargo_build(&root)
 }
 

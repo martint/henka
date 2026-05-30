@@ -25,19 +25,19 @@ The smoke client spins up a throwaway Java project, registers it, lists the avai
 Build the release binary (this also fetches the Java language server and builds the delegate-command bundle it needs):
 
 ```sh
-cargo xtask build          # -> target/release/henka-server
+cargo xtask build          # -> target/release/henka
 ```
 
 Run it over **stdio** for a single local client (the default):
 
 ```sh
-henka-server
+henka
 ```
 
 …or over **streamable HTTP** to host it for one or more clients at `/mcp`:
 
 ```sh
-henka-server --transport http --bind 127.0.0.1:8181
+henka --transport http --bind 127.0.0.1:8181
 ```
 
 Flags (each has effect only where noted):
@@ -68,13 +68,13 @@ Henka exposes a handful of tenancy tools — `register_project`, `unregister_pro
 Wire it into [Claude Code](https://claude.com/claude-code) over **stdio** (no network, no auth surface):
 
 ```sh
-claude mcp add henka -- /abs/path/to/target/release/henka-server
+claude mcp add henka -- /abs/path/to/target/release/henka
 ```
 
 …or over **HTTP**. Note the streamable-HTTP transport rejects non-loopback `Host` headers as a DNS-rebinding guard, so a client reaching the server under another name — e.g. from a container as `host.docker.internal` — needs that host allowed:
 
 ```sh
-henka-server --transport http --bind 0.0.0.0:8181 --allowed-host host.docker.internal
+henka --transport http --bind 0.0.0.0:8181 --allowed-host host.docker.internal
 claude mcp add --transport http henka http://host.docker.internal:8181/mcp
 ```
 

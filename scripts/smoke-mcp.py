@@ -4,7 +4,7 @@ register -> list_operations -> rename (preview, then apply) flow."""
 import json, os, subprocess, sys, tempfile, pathlib
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-BIN = REPO / "target/debug/henka-server"
+BIN = REPO / "target/debug/henka"
 
 def main():
     work = tempfile.mkdtemp()

@@ -25,7 +25,7 @@ enum Transport {
 
 /// Multi-tenant MCP server for code refactorings.
 #[derive(Debug, Parser)]
-#[command(name = "henka-server", version, about)]
+#[command(name = "henka", version, about)]
 struct Cli {
     /// How clients connect.
     #[arg(long, value_enum, default_value_t = Transport::Stdio)]
