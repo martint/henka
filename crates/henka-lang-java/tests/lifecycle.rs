@@ -4,12 +4,12 @@
 //! Run with a jdtls distribution present (e.g. `scripts/fetch-jdtls.sh`):
 //!
 //! ```text
-//! cargo test -p refactor-lang-java -- --ignored
+//! cargo test -p henka-lang-java -- --ignored
 //! ```
 
 use std::path::PathBuf;
 
-use refactor_lang_java::{JdtlsInstall, JdtlsSession};
+use henka_lang_java::{JdtlsInstall, JdtlsSession};
 
 /// The repo's default jdtls cache, relative to this crate.
 fn jdtls_home() -> PathBuf {

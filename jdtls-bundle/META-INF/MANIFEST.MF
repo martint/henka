@@ -1,7 +1,7 @@
 Manifest-Version: 1.0
 Bundle-ManifestVersion: 2
-Bundle-Name: Refactor MCP Delegate Commands
-Bundle-SymbolicName: dev.refactor.jdtls;singleton:=true
+Bundle-Name: Henka MCP Delegate Commands
+Bundle-SymbolicName: dev.henka.jdtls;singleton:=true
 Bundle-Version: 0.0.1
 Bundle-RequiredExecutionEnvironment: JavaSE-21
 Require-Bundle: org.eclipse.jdt.ls.core,

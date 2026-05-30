@@ -1,4 +1,4 @@
-//! Core, language-agnostic building blocks for the Refactor server.
+//! Core, language-agnostic building blocks for the Henka server.
 //!
 //! This crate holds the multi-tenant [`ProjectRegistry`], the [`Language`]
 //! model, and (in later phases) the pluggable refactoring framework and

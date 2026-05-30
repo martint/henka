@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use refactor_lsp::LspClient;
+use henka_lsp::LspClient;
 use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::sync::{Mutex, broadcast};
@@ -39,7 +39,7 @@ impl JdtlsInstall {
     /// Locate a jdtls distribution.
     ///
     /// Searches, in order: `$JDTLS_HOME`, `./.cache/jdtls`, and
-    /// `$XDG_CACHE_HOME`/`~/.cache` under `refactor-mcp/jdtls`.
+    /// `$XDG_CACHE_HOME`/`~/.cache` under `henka/jdtls`.
     pub fn locate() -> Result<Self> {
         let mut candidates: Vec<PathBuf> = Vec::new();
         if let Some(home) = std::env::var_os("JDTLS_HOME") {
@@ -127,31 +127,31 @@ fn launcher_in(home: &Path) -> Option<PathBuf> {
     None
 }
 
-/// The base cache directory: `$XDG_CACHE_HOME`/`~/.cache` under `refactor-mcp`.
+/// The base cache directory: `$XDG_CACHE_HOME`/`~/.cache` under `henka`.
 pub fn cache_base() -> PathBuf {
     std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .unwrap_or_else(|| PathBuf::from(".cache"))
-        .join("refactor-mcp")
+        .join("henka")
 }
 
 /// Locate the refactoring delegate-command bundle jar, if built.
 ///
-/// Searches `$REFACTOR_JDTLS_BUNDLE`, then `jdtls-bundle/` relative to the
+/// Searches `$HENKA_JDTLS_BUNDLE`, then `jdtls-bundle/` relative to the
 /// working directory, then the cache dir. Returns `None` if not found, in which
 /// case the parameterized refactorings (change-signature, move) are unavailable.
 pub fn locate_bundle() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("REFACTOR_JDTLS_BUNDLE") {
+    if let Some(p) = std::env::var_os("HENKA_JDTLS_BUNDLE") {
         let p = PathBuf::from(p);
         if p.is_file() {
             return Some(p);
         }
     }
     [
-        PathBuf::from("jdtls-bundle/refactor-jdtls-bundle.jar"),
-        cache_base().join("refactor-jdtls-bundle.jar"),
+        PathBuf::from("jdtls-bundle/henka-jdtls-bundle.jar"),
+        cache_base().join("henka-jdtls-bundle.jar"),
     ]
     .into_iter()
     .find(|p| p.is_file())

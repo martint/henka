@@ -9,9 +9,9 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 # Internal crates
-refactor-core = { path = "crates/refactor-core" }
-refactor-lsp = { path = "crates/refactor-lsp" }
-refactor-lang-java = { path = "crates/refactor-lang-java" }
+henka-core = { path = "crates/henka-core" }
+henka-lsp = { path = "crates/henka-lsp" }
+henka-lang-java = { path = "crates/henka-lang-java" }
 
 # External
 anyhow = "1"

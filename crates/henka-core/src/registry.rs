@@ -127,11 +127,11 @@ impl ProjectRegistry {
     }
 }
 
-/// Resolve the default registry path: `$REFACTOR_MCP_CONFIG`, else
-/// `$XDG_CONFIG_HOME/refactor-mcp/projects.toml`, else
-/// `$HOME/.config/refactor-mcp/projects.toml`.
+/// Resolve the default registry path: `$HENKA_CONFIG`, else
+/// `$XDG_CONFIG_HOME/henka/projects.toml`, else
+/// `$HOME/.config/henka/projects.toml`.
 pub fn default_config_path() -> PathBuf {
-    if let Some(explicit) = std::env::var_os("REFACTOR_MCP_CONFIG") {
+    if let Some(explicit) = std::env::var_os("HENKA_CONFIG") {
         return PathBuf::from(explicit);
     }
     let base = std::env::var_os("XDG_CONFIG_HOME")
@@ -139,7 +139,7 @@ pub fn default_config_path() -> PathBuf {
         .filter(|p| !p.as_os_str().is_empty())
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
         .unwrap_or_else(|| PathBuf::from(".config"));
-    base.join("refactor-mcp").join("projects.toml")
+    base.join("henka").join("projects.toml")
 }
 
 /// Normalize and validate a project root path.

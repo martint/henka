@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use refactor_lang_java::{JdtlsInstall, JdtlsSession};
+use henka_lang_java::{JdtlsInstall, JdtlsSession};
 use serde_json::{Value, json};
 
 fn repo() -> PathBuf {
@@ -12,7 +12,7 @@ fn repo() -> PathBuf {
 
 async fn session_with_bundle(root: &std::path::Path) -> JdtlsSession {
     let install = JdtlsInstall::at(repo().join(".cache/jdtls")).unwrap();
-    let bundle = repo().join("jdtls-bundle/refactor-jdtls-bundle.jar");
+    let bundle = repo().join("jdtls-bundle/henka-jdtls-bundle.jar");
     assert!(
         bundle.is_file(),
         "build the bundle first: jdtls-bundle/build.sh"
@@ -56,7 +56,7 @@ async fn bundle_get_refactor_edit() {
 
     let result = execute(
         &session,
-        "refactor.mcp.getRefactorEdit",
+        "henka.mcp.getRefactorEdit",
         json!([{
             "command": "extractVariable",
             "context": {
@@ -102,7 +102,7 @@ async fn bundle_change_signature() {
 
     let info = execute(
         &session,
-        "refactor.mcp.getChangeSignatureInfo",
+        "henka.mcp.getChangeSignatureInfo",
         json!([context]),
     )
     .await;
@@ -123,7 +123,7 @@ async fn bundle_change_signature() {
     ]);
     let result = execute(
         &session,
-        "refactor.mcp.getRefactorEdit",
+        "henka.mcp.getRefactorEdit",
         json!([{ "command": "changeSignature", "context": context, "commandArguments": command_arguments }]),
     )
     .await;

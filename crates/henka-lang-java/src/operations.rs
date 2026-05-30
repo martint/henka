@@ -3,11 +3,11 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use refactor_core::operation::{
+use henka_core::operation::{
     Operation, OperationCtx, OperationDescriptor, OperationKind, OperationOutcome,
     OperationRequest, Target, TargetKind,
 };
-use refactor_core::{Error as CoreError, Language, Position, Result as CoreResult};
+use henka_core::{Error as CoreError, Language, Position, Result as CoreResult};
 use serde_json::{Value, json};
 
 use crate::jdtls::JdtlsSession;
@@ -369,7 +369,7 @@ impl Operation for ChangeSignatureOp {
         // Step 1: current signature.
         let info = execute_command(
             session,
-            "refactor.mcp.getChangeSignatureInfo",
+            "henka.mcp.getChangeSignatureInfo",
             json!([context]),
         )
         .await?;
@@ -425,7 +425,7 @@ impl Operation for ChangeSignatureOp {
 
         let result = execute_command(
             session,
-            "refactor.mcp.getRefactorEdit",
+            "henka.mcp.getRefactorEdit",
             json!([refactor_params]),
         )
         .await?;

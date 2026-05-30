@@ -1,8 +1,8 @@
-# Refactor — Product Specification
+# Henka — Product Specification
 
-## 1. What Refactor is
+## 1. What Henka is
 
-Refactor is a server that performs **structured, semantics-aware operations on code** on behalf
+Henka is a server that performs **structured, semantics-aware operations on code** on behalf
 of an automated agent. It speaks the Model Context Protocol (MCP), so any MCP-capable client — an
 AI coding assistant, an editor, a script — can ask it to do two kinds of thing:
 
@@ -18,12 +18,12 @@ semantics instead of resorting to brute-force text search. "Where is this method
 answered by the compiler's view of the code, not by grepping a string that also matches comments,
 unrelated identifiers, and the wrong overload.
 
-Refactor is **multi-tenant**: one running server hosts many independent projects at once and keeps
+Henka is **multi-tenant**: one running server hosts many independent projects at once and keeps
 each project's analysis separate. It is **language-extensible**: operations are contributed per
 language, with **Java** supported first. And it is **safe by construction**: every edit can be
 previewed as a diff before anything touches disk.
 
-Refactor does not replace version control, a build system, or an editor. It is the component that
+Henka does not replace version control, a build system, or an editor. It is the component that
 answers one question well: *"operate on this code, correctly, using its real semantics."*
 
 ## 2. The vocabulary
@@ -116,7 +116,7 @@ and a **skill resource** (guidance).
 
 ### 3.2 The skill resource
 
-The server publishes a **skill** as an MCP resource at `skill://refactor/refactoring`. It is a
+The server publishes a **skill** as an MCP resource at `skill://henka/refactoring`. It is a
 written workflow that teaches an agent how to use the server: register a project, discover which
 operations apply, prefer a semantic query over a text search, and preview edits with `dry_run`
 before applying. Clients are pointed to it from the server's own instructions.

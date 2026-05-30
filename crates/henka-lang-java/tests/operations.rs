@@ -3,18 +3,16 @@
 //! Ignored by default (they launch a JVM). Run with:
 //!
 //! ```text
-//! cargo test -p refactor-lang-java -- --ignored
+//! cargo test -p henka-lang-java -- --ignored
 //! ```
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use refactor_core::operation::{
-    Operation, OperationCtx, OperationOutcome, OperationRequest, Target,
-};
-use refactor_core::{EditApplier, Language, LanguageSession, Position, Project, Range};
-use refactor_lang_java::operations::{ChangeSignatureOp, CodeActionOp, FindUsagesOp, RenameOp};
-use refactor_lang_java::{JdtlsInstall, JdtlsSession};
+use henka_core::operation::{Operation, OperationCtx, OperationOutcome, OperationRequest, Target};
+use henka_core::{EditApplier, Language, LanguageSession, Position, Project, Range};
+use henka_lang_java::operations::{ChangeSignatureOp, CodeActionOp, FindUsagesOp, RenameOp};
+use henka_lang_java::{JdtlsInstall, JdtlsSession};
 use serde_json::json;
 
 fn jdtls_home() -> PathBuf {
@@ -53,7 +51,7 @@ async fn session_for(root: &Path) -> Arc<dyn LanguageSession> {
     // (change-signature) are available.
     let bundle = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("jdtls-bundle/refactor-jdtls-bundle.jar");
+        .join("jdtls-bundle/henka-jdtls-bundle.jar");
     let bundles: Vec<PathBuf> = bundle.is_file().then_some(bundle).into_iter().collect();
     let session = JdtlsSession::start(&install, root, &data, &bundles)
         .await
@@ -97,7 +95,7 @@ async fn rename_updates_references_across_files() {
         .await
         .expect("rename should succeed");
     let edit = match outcome {
-        refactor_core::OperationOutcome::Edit(edit) => edit,
+        henka_core::OperationOutcome::Edit(edit) => edit,
         _ => panic!("rename should produce an edit"),
     };
     assert!(!edit.is_empty(), "rename should produce edits");
@@ -140,7 +138,7 @@ async fn find_usages_locates_references() {
         .await
         .expect("find-usages should succeed");
     let value = match outcome {
-        refactor_core::OperationOutcome::Query(value) => value,
+        henka_core::OperationOutcome::Query(value) => value,
         _ => panic!("find-usages should produce a query result"),
     };
 

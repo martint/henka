@@ -8,8 +8,8 @@
 
 use std::sync::Arc;
 
-use refactor_core::operation::{OperationCtx, OperationOutcome, OperationRequest};
-use refactor_core::{
+use henka_core::operation::{OperationCtx, OperationOutcome, OperationRequest};
+use henka_core::{
     EditApplier, Error as CoreError, OperationRegistry, Project, ProjectRegistry, ProviderRegistry,
 };
 use rmcp::model::{
@@ -30,7 +30,7 @@ use crate::ops;
 
 /// The skill resource: a written refactoring workflow, served over MCP and
 /// embedded at build time so the server stays a single self-contained binary.
-const SKILL_URI: &str = "skill://refactor/refactoring";
+const SKILL_URI: &str = "skill://henka/refactoring";
 const SKILL_BODY: &str = include_str!("../skills/refactoring.md");
 
 /// A JSON object, matching rmcp's tool-schema representation.
@@ -38,13 +38,13 @@ type JsonObject = Map<String, Value>;
 
 /// The MCP server handler.
 #[derive(Clone)]
-pub struct RefactorMcp {
+pub struct HenkaMcp {
     registry: Arc<RwLock<ProjectRegistry>>,
     providers: Arc<ProviderRegistry>,
     operations: Arc<OperationRegistry>,
 }
 
-impl RefactorMcp {
+impl HenkaMcp {
     /// Build a handler over the given project registry and language providers.
     /// The operation catalog is assembled from the providers' contributions.
     pub fn new(registry: ProjectRegistry, providers: ProviderRegistry) -> Self {
@@ -91,7 +91,7 @@ struct NoParams {}
 // Tool catalog
 // ---------------------------------------------------------------------------
 
-impl RefactorMcp {
+impl HenkaMcp {
     /// The full tool list: tenancy + discovery tools, plus one tool per
     /// operation in the catalog.
     fn tools(&self) -> Vec<Tool> {
@@ -133,7 +133,10 @@ impl RefactorMcp {
         tools
     }
 
-    async fn handle_call(&self, request: CallToolRequestParams) -> Result<CallToolResult, McpError> {
+    async fn handle_call(
+        &self,
+        request: CallToolRequestParams,
+    ) -> Result<CallToolResult, McpError> {
         match request.name.as_ref() {
             "register_project" => {
                 let p: RegisterProjectParams = parse_args(request.arguments)?;
@@ -248,7 +251,7 @@ impl RefactorMcp {
 // ServerHandler
 // ---------------------------------------------------------------------------
 
-impl ServerHandler for RefactorMcp {
+impl ServerHandler for HenkaMcp {
     fn get_info(&self) -> ServerInfo {
         // rmcp's model structs are #[non_exhaustive], so build via default and
         // assign the fields we set.
@@ -270,7 +273,7 @@ impl ServerHandler for RefactorMcp {
              refactorings and structural replace (edits), plus semantic queries like \
              find-usages and go-to-definition. Prefer a semantic query over text search. \
              Edit operations default to a preview (a diff); pass `dry_run: false` to apply. \
-             Read the resource `skill://refactor/refactoring` for the full workflow."
+             Read the resource `skill://henka/refactoring` for the full workflow."
                 .into(),
         );
         info
@@ -406,11 +409,11 @@ mod tests {
     use std::path::Path;
 
     use async_trait::async_trait;
-    use refactor_core::operation::{
+    use henka_core::operation::{
         Operation, OperationCtx, OperationDescriptor, OperationKind, OperationOutcome,
         OperationRequest, Target, TargetKind,
     };
-    use refactor_core::{
+    use henka_core::{
         FileEdit, Language, LanguageProvider, LanguageSession, PositionEncoding, Range, Result,
         TextEdit, WorkspaceEdit,
     };
@@ -522,7 +525,7 @@ mod tests {
     }
 
     /// Build a handler over a fresh Java project containing `Main.java`.
-    fn handler_with_project(dir: &Path) -> (RefactorMcp, std::path::PathBuf) {
+    fn handler_with_project(dir: &Path) -> (HenkaMcp, std::path::PathBuf) {
         let cfg = dir.join("projects.toml");
         let root = dir.join("proj");
         std::fs::create_dir_all(&root).unwrap();
@@ -535,7 +538,7 @@ mod tests {
         let mut providers = ProviderRegistry::new();
         providers.register(Arc::new(MockProvider));
 
-        (RefactorMcp::new(registry, providers), root)
+        (HenkaMcp::new(registry, providers), root)
     }
 
     fn args(value: Value) -> Option<JsonObject> {

@@ -493,6 +493,67 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "henka-core"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "similar",
+ "tempfile",
+ "thiserror",
+ "toml",
+ "tracing",
+ "walkdir",
+]
+
+[[package]]
+name = "henka-lang-java"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "henka-core",
+ "henka-lsp",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "henka-lsp"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "henka-server"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "clap",
+ "henka-core",
+ "henka-lang-java",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "http"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -829,67 +890,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "refactor-core"
-version = "0.0.0"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "similar",
- "tempfile",
- "thiserror",
- "toml",
- "tracing",
- "walkdir",
-]
-
-[[package]]
-name = "refactor-lang-java"
-version = "0.0.0"
-dependencies = [
- "async-trait",
- "refactor-core",
- "refactor-lsp",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "refactor-lsp"
-version = "0.0.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "refactor-server"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "clap",
- "refactor-core",
- "refactor-lang-java",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

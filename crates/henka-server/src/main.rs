@@ -1,4 +1,4 @@
-//! The Refactor MCP server binary.
+//! The Henka MCP server binary.
 
 mod mcp;
 mod ops;
@@ -6,13 +6,13 @@ mod ops;
 use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
-use refactor_core::{ProjectRegistry, ProviderRegistry, default_config_path};
+use henka_core::{ProjectRegistry, ProviderRegistry, default_config_path};
 use rmcp::ServiceExt;
 use rmcp::transport::stdio;
 use rmcp::transport::streamable_http_server::StreamableHttpService;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 
-use crate::mcp::RefactorMcp;
+use crate::mcp::HenkaMcp;
 
 /// How clients connect to the server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -25,7 +25,7 @@ enum Transport {
 
 /// Multi-tenant MCP server for code refactorings.
 #[derive(Debug, Parser)]
-#[command(name = "refactor-server", version, about)]
+#[command(name = "henka-server", version, about)]
 struct Cli {
     /// How clients connect.
     #[arg(long, value_enum, default_value_t = Transport::Stdio)]
@@ -36,7 +36,7 @@ struct Cli {
     bind: String,
 
     /// Path to the project registry file. Defaults to
-    /// `$XDG_CONFIG_HOME/refactor-mcp/projects.toml`.
+    /// `$XDG_CONFIG_HOME/henka/projects.toml`.
     #[arg(long)]
     config: Option<PathBuf>,
 }
@@ -52,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(projects = registry.len(), "registry loaded");
 
     let providers = build_providers();
-    let handler = RefactorMcp::new(registry, providers);
+    let handler = HenkaMcp::new(registry, providers);
 
     match cli.transport {
         Transport::Stdio => {
@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Serve the handler over streamable HTTP at `/mcp`, one MCP session per client.
-async fn serve_http(handler: RefactorMcp, bind: &str) -> anyhow::Result<()> {
+async fn serve_http(handler: HenkaMcp, bind: &str) -> anyhow::Result<()> {
     let service = StreamableHttpService::new(
         move || Ok(handler.clone()),
         std::sync::Arc::new(LocalSessionManager::default()),
@@ -83,7 +83,7 @@ async fn serve_http(handler: RefactorMcp, bind: &str) -> anyhow::Result<()> {
 /// server still serves the languages that are ready.
 fn build_providers() -> ProviderRegistry {
     let mut providers = ProviderRegistry::new();
-    match refactor_lang_java::JavaProvider::new() {
+    match henka_lang_java::JavaProvider::new() {
         Ok(java) => {
             tracing::info!("Java provider ready (jdtls located)");
             providers.register(std::sync::Arc::new(java));
@@ -98,7 +98,7 @@ fn build_providers() -> ProviderRegistry {
 /// Initialize tracing to stderr — stdout is reserved for the MCP stdio channel.
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_env("REFACTOR_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_env("HENKA_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(filter)

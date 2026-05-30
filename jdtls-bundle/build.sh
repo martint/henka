@@ -21,6 +21,6 @@ mkdir -p "$out/classes"
 
 javac --release 21 -cp "$cp" -d "$out/classes" $(find "$here/src" -name '*.java')
 
-jar="$here/refactor-jdtls-bundle.jar"
+jar="$here/henka-jdtls-bundle.jar"
 ( cd "$here" && jar cfm "$jar" META-INF/MANIFEST.MF -C "$out/classes" . plugin.xml )
 echo "built $jar"

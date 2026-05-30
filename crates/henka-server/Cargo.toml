@@ -1,17 +1,17 @@
 [package]
-name = "refactor-server"
+name = "henka-server"
 version = "0.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "refactor-server"
+name = "henka-server"
 path = "src/main.rs"
 
 [dependencies]
-refactor-core = { workspace = true }
-refactor-lang-java = { workspace = true }
+henka-core = { workspace = true }
+henka-lang-java = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }
 axum = { workspace = true }

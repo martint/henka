@@ -2,11 +2,11 @@
 <?eclipse version="3.4"?>
 <plugin>
    <extension point="org.eclipse.jdt.ls.core.delegateCommandHandler">
-      <delegateCommandHandler class="dev.refactor.jdtls.RefactorDelegateCommandHandler">
-         <command id="refactor.mcp.getRefactorEdit"/>
-         <command id="refactor.mcp.getMoveDestinations"/>
-         <command id="refactor.mcp.move"/>
-         <command id="refactor.mcp.getChangeSignatureInfo"/>
+      <delegateCommandHandler class="dev.henka.jdtls.HenkaDelegateCommandHandler">
+         <command id="henka.mcp.getRefactorEdit"/>
+         <command id="henka.mcp.getMoveDestinations"/>
+         <command id="henka.mcp.move"/>
+         <command id="henka.mcp.getChangeSignatureInfo"/>
       </delegateCommandHandler>
    </extension>
 </plugin>

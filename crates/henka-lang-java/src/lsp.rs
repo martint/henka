@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use refactor_core::{
+use henka_core::{
     FileEdit, FileOperation, Position, PositionEncoding, Range, TextEdit, WorkspaceEdit,
 };
 use serde::Deserialize;

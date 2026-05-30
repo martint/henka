@@ -4,7 +4,7 @@ register -> list_operations -> rename (preview, then apply) flow."""
 import json, os, subprocess, sys, tempfile, pathlib
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-BIN = REPO / "target/debug/refactor-server"
+BIN = REPO / "target/debug/henka-server"
 
 def main():
     work = tempfile.mkdtemp()
@@ -17,7 +17,7 @@ def main():
         "        System.out.println(new Greeting().greet());\n    }\n}\n")
     cfg = pathlib.Path(work) / "projects.toml"
 
-    env = dict(os.environ, REFACTOR_MCP_CONFIG=str(cfg), REFACTOR_LOG="warn",
+    env = dict(os.environ, HENKA_CONFIG=str(cfg), HENKA_LOG="warn",
                JDTLS_HOME=str(REPO / ".cache/jdtls"))
     p = subprocess.Popen([str(BIN)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=subprocess.DEVNULL, env=env, text=True, bufsize=1)

@@ -1,4 +1,4 @@
-package dev.refactor.jdtls;
+package dev.henka.jdtls;
 
 import java.util.List;
 
@@ -18,15 +18,15 @@ import org.eclipse.lsp4j.CodeActionParams;
 /**
  * Exposes Eclipse JDT LS refactoring handlers that the stock distribution ships
  * but does not register as executeCommand delegates. Loaded into jdtls via the
- * {@code bundles} initialization option so a headless client (the Refactor MCP
+ * {@code bundles} initialization option so a headless client (the Henka MCP
  * server) can drive change-signature, move, and parameterized extract.
  */
-public class RefactorDelegateCommandHandler implements IDelegateCommandHandler {
+public class HenkaDelegateCommandHandler implements IDelegateCommandHandler {
 
-    public static final String GET_REFACTOR_EDIT = "refactor.mcp.getRefactorEdit";
-    public static final String GET_MOVE_DESTINATIONS = "refactor.mcp.getMoveDestinations";
-    public static final String MOVE = "refactor.mcp.move";
-    public static final String GET_CHANGE_SIGNATURE_INFO = "refactor.mcp.getChangeSignatureInfo";
+    public static final String GET_REFACTOR_EDIT = "henka.mcp.getRefactorEdit";
+    public static final String GET_MOVE_DESTINATIONS = "henka.mcp.getMoveDestinations";
+    public static final String MOVE = "henka.mcp.move";
+    public static final String GET_CHANGE_SIGNATURE_INFO = "henka.mcp.getChangeSignatureInfo";
 
     private static final Gson GSON = new Gson();
 

@@ -1,4 +1,4 @@
-# Refactor
+# Henka
 
 A multi-tenant [MCP](https://modelcontextprotocol.io) server that performs structured,
 semantics-aware code refactorings — rename, extract, inline, organize imports, and more — on

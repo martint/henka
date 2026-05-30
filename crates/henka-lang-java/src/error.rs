@@ -23,7 +23,7 @@ pub enum JavaError {
 
     /// The language server protocol failed.
     #[error(transparent)]
-    Lsp(#[from] refactor_lsp::LspError),
+    Lsp(#[from] henka_lsp::LspError),
 
     /// An I/O error.
     #[error(transparent)]

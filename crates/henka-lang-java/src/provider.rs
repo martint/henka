@@ -7,9 +7,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use refactor_core::operation::Operation;
-use refactor_core::provider::{LanguageProvider, LanguageSession};
-use refactor_core::{Error as CoreError, Language, Project, Result as CoreResult, detect_revision};
+use henka_core::operation::Operation;
+use henka_core::provider::{LanguageProvider, LanguageSession};
+use henka_core::{Error as CoreError, Language, Project, Result as CoreResult, detect_revision};
 use tokio::sync::Mutex;
 
 use crate::error::JavaError;

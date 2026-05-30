@@ -9,8 +9,8 @@
 
 use std::sync::Arc;
 
-use refactor_core::operation::{OperationDescriptor, OperationKind, TargetKind};
-use refactor_core::{Position, Range, Target};
+use henka_core::operation::{OperationDescriptor, OperationKind, TargetKind};
+use henka_core::{Position, Range, Target};
 use rmcp::ErrorData as McpError;
 use rmcp::model::Tool;
 use serde_json::{Map, Value, json};
