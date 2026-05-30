@@ -13,9 +13,9 @@ use refactor_core::{
     EditApplier, Error as CoreError, OperationRegistry, Project, ProjectRegistry, ProviderRegistry,
 };
 use rmcp::model::{
-    Annotated, CallToolRequestParam, CallToolResult, Content, Implementation,
-    InitializeRequestParam, InitializeResult, ListResourcesResult, ListToolsResult,
-    PaginatedRequestParam, ProtocolVersion, RawResource, ReadResourceRequestParam,
+    Annotated, CallToolRequestParams, CallToolResult, Content, Implementation,
+    InitializeRequestParams, InitializeResult, ListResourcesResult, ListToolsResult,
+    PaginatedRequestParams, ProtocolVersion, RawResource, ReadResourceRequestParams,
     ReadResourceResult, ResourceContents, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::RequestContext;
@@ -133,7 +133,7 @@ impl RefactorMcp {
         tools
     }
 
-    async fn handle_call(&self, request: CallToolRequestParam) -> Result<CallToolResult, McpError> {
+    async fn handle_call(&self, request: CallToolRequestParams) -> Result<CallToolResult, McpError> {
         match request.name.as_ref() {
             "register_project" => {
                 let p: RegisterProjectParams = parse_args(request.arguments)?;
@@ -250,57 +250,56 @@ impl RefactorMcp {
 
 impl ServerHandler for RefactorMcp {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder()
-                .enable_tools()
-                .enable_resources()
-                .build(),
-            server_info: Implementation {
-                name: env!("CARGO_PKG_NAME").into(),
-                version: env!("CARGO_PKG_VERSION").into(),
-                ..Implementation::from_build_env()
-            },
-            instructions: Some(
-                "Multi-tenant server for semantics-aware code operations. One server hosts many \
-                 projects; pass the project `id` on every operation. Register a source tree with \
-                 `register_project`, then `list_operations` to see what a project supports: \
-                 refactorings and structural replace (edits), plus semantic queries like \
-                 find-usages and go-to-definition. Prefer a semantic query over text search. \
-                 Edit operations default to a preview (a diff); pass `dry_run: false` to apply. \
-                 Read the resource `skill://refactor/refactoring` for the full workflow."
-                    .into(),
-            ),
-        }
+        // rmcp's model structs are #[non_exhaustive], so build via default and
+        // assign the fields we set.
+        let mut implementation = Implementation::from_build_env();
+        implementation.name = env!("CARGO_PKG_NAME").into();
+        implementation.version = env!("CARGO_PKG_VERSION").into();
+
+        let mut info = ServerInfo::default();
+        info.protocol_version = ProtocolVersion::V_2024_11_05;
+        info.capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_resources()
+            .build();
+        info.server_info = implementation;
+        info.instructions = Some(
+            "Multi-tenant server for semantics-aware code operations. One server hosts many \
+             projects; pass the project `id` on every operation. Register a source tree with \
+             `register_project`, then `list_operations` to see what a project supports: \
+             refactorings and structural replace (edits), plus semantic queries like \
+             find-usages and go-to-definition. Prefer a semantic query over text search. \
+             Edit operations default to a preview (a diff); pass `dry_run: false` to apply. \
+             Read the resource `skill://refactor/refactoring` for the full workflow."
+                .into(),
+        );
+        info
     }
 
     async fn initialize(
         &self,
-        request: InitializeRequestParam,
+        request: InitializeRequestParams,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
-        Ok(InitializeResult {
-            protocol_version: request.protocol_version,
-            capabilities: self.get_info().capabilities,
-            server_info: self.get_info().server_info,
-            instructions: self.get_info().instructions,
-        })
+        let mut result = self.get_info();
+        result.protocol_version = request.protocol_version;
+        Ok(result)
     }
 
     async fn list_tools(
         &self,
-        _request: Option<PaginatedRequestParam>,
+        _request: Option<PaginatedRequestParams>,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         Ok(ListToolsResult {
             tools: self.tools(),
-            next_cursor: None,
+            ..Default::default()
         })
     }
 
     async fn call_tool(
         &self,
-        request: CallToolRequestParam,
+        request: CallToolRequestParams,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.handle_call(request).await
@@ -308,7 +307,7 @@ impl ServerHandler for RefactorMcp {
 
     async fn list_resources(
         &self,
-        _request: Option<PaginatedRequestParam>,
+        _request: Option<PaginatedRequestParams>,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         let raw = RawResource {
@@ -324,27 +323,28 @@ impl ServerHandler for RefactorMcp {
             mime_type: Some("text/markdown".into()),
             size: Some(SKILL_BODY.len() as u32),
             icons: None,
+            meta: None,
         };
         Ok(ListResourcesResult {
             resources: vec![Annotated::new(raw, None)],
-            next_cursor: None,
+            ..Default::default()
         })
     }
 
     async fn read_resource(
         &self,
-        request: ReadResourceRequestParam,
+        request: ReadResourceRequestParams,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
         match request.uri.as_str() {
-            SKILL_URI => Ok(ReadResourceResult {
-                contents: vec![ResourceContents::TextResourceContents {
+            SKILL_URI => Ok(ReadResourceResult::new(vec![
+                ResourceContents::TextResourceContents {
                     uri: SKILL_URI.into(),
                     mime_type: Some("text/markdown".into()),
                     text: SKILL_BODY.into(),
                     meta: None,
-                }],
-            }),
+                },
+            ])),
             other => Err(McpError::resource_not_found(
                 "resource not found",
                 Some(json!({ "uri": other })),
@@ -542,11 +542,10 @@ mod tests {
         value.as_object().cloned()
     }
 
-    fn call(name: &str, arguments: Option<JsonObject>) -> CallToolRequestParam {
-        CallToolRequestParam {
-            name: name.to_string().into(),
-            arguments,
-        }
+    fn call(name: &str, arguments: Option<JsonObject>) -> CallToolRequestParams {
+        let mut request = CallToolRequestParams::new(name.to_string());
+        request.arguments = arguments;
+        request
     }
 
     #[tokio::test]
