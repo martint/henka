@@ -10,6 +10,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 # Internal crates
 refactor-core = { path = "crates/refactor-core" }
+refactor-lsp = { path = "crates/refactor-lsp" }
 
 # External
 anyhow = "1"

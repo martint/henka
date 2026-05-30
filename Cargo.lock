@@ -653,6 +653,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "refactor-lang-java"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "refactor-core",
+ "refactor-lsp",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "refactor-lsp"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "refactor-server"
 version = "0.0.0"
 dependencies = [
