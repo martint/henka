@@ -161,6 +161,71 @@ pub fn repo_identity(path: &Path) -> Option<RepoId> {
     None
 }
 
+/// The relative paths of files modified in the working copy at `root` versus
+/// its base, restricted to files that currently exist on disk (so they can be
+/// read and overlaid). Empty for a clean git worktree.
+///
+/// Uses `git status` for git and `jj diff` for jj. The jj query snapshots the
+/// working copy (jj's normal behavior), unlike the read-only [`detect_revision`].
+pub fn working_copy_delta(root: &Path) -> Vec<PathBuf> {
+    let paths = if root.join(".jj").is_dir() {
+        run(root, "jj", &["diff", "--summary", "-r", "@"]).map(|s| parse_jj_diff_summary(&s))
+    } else if root.join(".git").exists() {
+        run_bytes(root, "git", &["status", "--porcelain", "-z"])
+            .map(|b| parse_git_porcelain_z(&b))
+    } else {
+        None
+    };
+
+    paths
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|rel| root.join(rel).is_file())
+        .collect()
+}
+
+/// Parse `git status --porcelain -z` output. Entries are NUL-terminated; a
+/// rename entry is two NUL-separated fields (`old\0new`) and contributes its
+/// destination. The two-character status prefix and following space are
+/// stripped.
+fn parse_git_porcelain_z(bytes: &[u8]) -> Vec<PathBuf> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut fields = text.split('\0').filter(|s| !s.is_empty());
+    let mut out = Vec::new();
+    while let Some(entry) = fields.next() {
+        // Each entry is `XY <path>`; the status is the first two chars.
+        let status = entry.as_bytes();
+        let is_rename = status.first() == Some(&b'R') || status.get(1) == Some(&b'R');
+        let path = entry.get(3..).unwrap_or("");
+        if is_rename {
+            // The destination is this entry's path; the next field is the
+            // original name, which we skip.
+            out.push(PathBuf::from(path));
+            let _ = fields.next();
+        } else {
+            out.push(PathBuf::from(path));
+        }
+    }
+    out
+}
+
+/// Parse `jj diff --summary` output: one `STATUS path` per line, where STATUS is
+/// `A`/`M`/`D`, or `R old new` / `C old new` for rename/copy (destination last).
+fn parse_jj_diff_summary(text: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some((status, rest)) = line.split_once(' ') else {
+            continue;
+        };
+        let path = match status {
+            "R" | "C" => rest.rsplit_once(' ').map(|(_, dst)| dst).unwrap_or(rest),
+            _ => rest,
+        };
+        out.push(PathBuf::from(path));
+    }
+    out
+}
+
 /// Resolve a working copy's `.jj/repo` to the shared repo directory. For the
 /// default workspace this is a directory; for a secondary workspace it is a
 /// file whose contents point at the main repo's `.jj/repo`.
@@ -187,6 +252,19 @@ fn run(root: &Path, program: &str, args: &[&str]) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Like [`run`], but returns raw stdout bytes (for NUL-delimited output).
+fn run_bytes(root: &Path, program: &str, args: &[&str]) -> Option<Vec<u8>> {
+    let output = Command::new(program)
+        .args(args)
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(output.stdout)
 }
 
 #[cfg(test)]
@@ -251,6 +329,72 @@ mod tests {
             .status()
             .unwrap();
         true
+    }
+
+    #[test]
+    fn parse_git_porcelain_z_modified_and_untracked() {
+        let bytes = b" M src/A.java\0?? src/B.java\0A  src/C.java\0";
+        let got = parse_git_porcelain_z(bytes);
+        assert_eq!(
+            got,
+            vec![
+                PathBuf::from("src/A.java"),
+                PathBuf::from("src/B.java"),
+                PathBuf::from("src/C.java"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_git_porcelain_z_rename_takes_destination() {
+        // A rename entry is `R  new\0old`; the destination comes first.
+        let bytes = b"R  new.java\0old.java\0 M other.java\0";
+        let got = parse_git_porcelain_z(bytes);
+        assert_eq!(
+            got,
+            vec![PathBuf::from("new.java"), PathBuf::from("other.java")]
+        );
+    }
+
+    #[test]
+    fn parse_jj_diff_summary_variants() {
+        let text = "M src/A.java\nA src/B.java\nD src/C.java\nR old.java new.java\n";
+        let got = parse_jj_diff_summary(text);
+        assert_eq!(
+            got,
+            vec![
+                PathBuf::from("src/A.java"),
+                PathBuf::from("src/B.java"),
+                PathBuf::from("src/C.java"),
+                PathBuf::from("new.java"),
+            ]
+        );
+    }
+
+    #[test]
+    fn git_delta_lists_dirty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        if !git_init_commit(root) {
+            return;
+        }
+        // Modify the committed file and add a new one.
+        std::fs::write(root.join("a.txt"), "changed").unwrap();
+        std::fs::write(root.join("b.txt"), "new").unwrap();
+
+        let delta = working_copy_delta(root);
+        assert!(delta.contains(&PathBuf::from("a.txt")), "{delta:?}");
+        assert!(delta.contains(&PathBuf::from("b.txt")), "{delta:?}");
+    }
+
+    #[test]
+    fn git_clean_worktree_has_empty_delta() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        if !git_init_commit(root) {
+            return;
+        }
+        assert!(working_copy_delta(root).is_empty());
     }
 
     #[test]

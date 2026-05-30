@@ -27,4 +27,4 @@ pub use operation::{
 pub use project::{Project, validate_project_id};
 pub use provider::{LanguageProvider, LanguageSession, ProviderRegistry};
 pub use registry::{ProjectRegistry, default_config_path};
-pub use vcs::{RepoId, Revision, Vcs, detect_revision, repo_identity};
+pub use vcs::{RepoId, Revision, Vcs, detect_revision, repo_identity, working_copy_delta};
