@@ -21,9 +21,10 @@ const USAGE: &str = "\
 usage: cargo xtask <command>
 
 commands:
-  build     full build: fetch jdtls if missing, build the bundle, cargo build --release
-  jdtls     fetch the jdtls distribution into .cache/jdtls
-  bundle    compile the jdtls delegate-command bundle
+  build           full build: fetch the bundled language servers if missing, then cargo build --release
+  jdtls           fetch the jdtls distribution into .cache/jdtls
+  bundle          compile the jdtls delegate-command bundle
+  rust-analyzer   fetch the rust-analyzer binary into .cache/rust-analyzer
 ";
 
 fn main() {
@@ -33,6 +34,7 @@ fn main() {
         "build" => cmd_build(),
         "jdtls" => cmd_jdtls(),
         "bundle" => cmd_bundle(),
+        "rust-analyzer" => cmd_rust_analyzer(),
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
             Ok(())
@@ -61,6 +63,11 @@ fn cmd_build() -> Result<(), String> {
         step("jdtls and bundle already present, skipping");
     }
 
+    if !rust_analyzer_present(&root) {
+        step("rust-analyzer not found, fetching");
+        run_script(&root, "scripts/fetch-rust-analyzer.sh", &[])?;
+    }
+
     step("building henka (release)");
     cargo_build(&root)
 }
@@ -69,6 +76,12 @@ fn cmd_build() -> Result<(), String> {
 fn cmd_jdtls() -> Result<(), String> {
     let root = workspace_root();
     run_script(&root, "scripts/fetch-jdtls.sh", &[])
+}
+
+/// Fetch (or refresh) the rust-analyzer binary.
+fn cmd_rust_analyzer() -> Result<(), String> {
+    let root = workspace_root();
+    run_script(&root, "scripts/fetch-rust-analyzer.sh", &[])
 }
 
 /// Recompile the delegate-command bundle against the local jdtls.
@@ -88,6 +101,11 @@ fn jdtls_present(root: &Path) -> bool {
 /// Whether the delegate-command bundle jar has been built.
 fn bundle_present(root: &Path) -> bool {
     root.join("jdtls-bundle/henka-jdtls-bundle.jar").is_file()
+}
+
+/// Whether the rust-analyzer binary has been fetched into the default location.
+fn rust_analyzer_present(root: &Path) -> bool {
+    root.join(".cache/rust-analyzer/rust-analyzer").is_file()
 }
 
 /// Build the release binary, honoring cargo's `$CARGO` so the same toolchain
