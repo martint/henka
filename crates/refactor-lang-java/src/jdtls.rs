@@ -357,17 +357,15 @@ impl JdtlsSession {
                     }
                 }
             },
+            // Deliberately do NOT advertise the "advanced" refactoring
+            // capabilities (advancedExtractRefactoringSupport, executeClient
+            // CommandSupport, …). Those make jdtls delegate refactoring UI to
+            // the client via client-side commands; without them, jdtls computes
+            // the refactoring itself and returns the edit inline on the code
+            // action, which is what a headless client needs.
             "initializationOptions": {
                 "extendedClientCapabilities": {
-                    "classFileContentsSupport": true,
-                    "advancedExtractRefactoringSupport": true,
-                    "advancedOrganizeImportsSupport": true,
-                    "moveRefactoringSupport": true,
-                    "resolveAdditionalTextEditsSupport": true,
-                    "advancedIntroduceParameterRefactoringSupport": true,
-                    "extractInterfaceSupport": true,
-                    "executeClientCommandSupport": true,
-                    "inferSelectionSupport": ["extractMethod", "extractVariable", "extractConstant", "extractField"]
+                    "classFileContentsSupport": true
                 }
             }
         });

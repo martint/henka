@@ -9,9 +9,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use refactor_core::operation::{Operation, OperationCtx, OperationRequest, Target};
-use refactor_core::{EditApplier, Language, LanguageSession, Position, Project};
-use refactor_lang_java::operations::{FindUsagesOp, RenameOp};
+use refactor_core::operation::{
+    Operation, OperationCtx, OperationOutcome, OperationRequest, Target,
+};
+use refactor_core::{EditApplier, Language, LanguageSession, Position, Project, Range};
+use refactor_lang_java::operations::{CodeActionOp, FindUsagesOp, RenameOp};
 use refactor_lang_java::{JdtlsInstall, JdtlsSession};
 use serde_json::json;
 
@@ -138,4 +140,156 @@ async fn find_usages_locates_references() {
 
     let count = value.get("count").and_then(|c| c.as_u64()).unwrap_or(0);
     assert!(count >= 1, "expected at least one usage, got: {value}");
+}
+
+/// Find a code-action operation by id from the Java set.
+fn op(id: &str) -> std::sync::Arc<dyn Operation> {
+    CodeActionOp::java_set()
+        .into_iter()
+        .find(|o| o.descriptor().id == id)
+        .unwrap_or_else(|| panic!("operation `{id}` not found"))
+}
+
+/// Run an edit operation and apply its result to the working tree.
+async fn run_and_apply(
+    operation: &dyn Operation,
+    ctx: &OperationCtx<'_>,
+    req: OperationRequest,
+    root: &Path,
+) {
+    let outcome = operation
+        .run(ctx, &req)
+        .await
+        .expect("operation should succeed");
+    let edit = match outcome {
+        OperationOutcome::Edit(edit) => edit,
+        _ => panic!("expected an edit"),
+    };
+    assert!(!edit.is_empty(), "expected a non-empty edit");
+    EditApplier::apply(&edit, root).expect("edit should apply");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "launches a real jdtls JVM; run with --ignored"]
+async fn extract_variable_into_local() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("Calc.java"),
+        "public class Calc {\n    int compute() {\n        return 1 + 2 + 3;\n    }\n}\n",
+    )
+    .unwrap();
+
+    let session = session_for(root).await;
+    let project = project(root);
+    let ctx = OperationCtx {
+        project: &project,
+        session,
+    };
+
+    // Select `1 + 2 + 3` on line 2 (cols 15..24).
+    let selection = || Target::Selection {
+        file: PathBuf::from("Calc.java"),
+        range: Range::new(Position::new(2, 15), Position::new(2, 24)),
+    };
+
+    run_and_apply(
+        op("extract-variable").as_ref(),
+        &ctx,
+        OperationRequest {
+            target: selection(),
+            params: json!({}),
+        },
+        root,
+    )
+    .await;
+    let after = std::fs::read_to_string(root.join("Calc.java")).unwrap();
+    assert!(
+        after.contains("= 1 + 2 + 3"),
+        "extracted a variable: {after}"
+    );
+    assert!(after.contains("return i"), "uses the variable: {after}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "launches a real jdtls JVM; run with --ignored"]
+async fn organize_imports_removes_unused() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("Imp.java"),
+        "import java.util.List;\nimport java.util.ArrayList;\n\npublic class Imp {\n    List<String> x;\n}\n",
+    )
+    .unwrap();
+
+    let session = session_for(root).await;
+    let project = project(root);
+    let ctx = OperationCtx {
+        project: &project,
+        session,
+    };
+
+    run_and_apply(
+        op("organize-imports").as_ref(),
+        &ctx,
+        OperationRequest {
+            target: Target::File {
+                file: PathBuf::from("Imp.java"),
+            },
+            params: json!({}),
+        },
+        root,
+    )
+    .await;
+
+    let after = std::fs::read_to_string(root.join("Imp.java")).unwrap();
+    assert!(
+        after.contains("import java.util.List;"),
+        "kept used import: {after}"
+    );
+    assert!(
+        !after.contains("ArrayList"),
+        "removed unused import: {after}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "launches a real jdtls JVM; run with --ignored"]
+async fn inline_local_variable() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("Inl.java"),
+        "public class Inl {\n    int f() {\n        int x = 5;\n        return x + 1;\n    }\n}\n",
+    )
+    .unwrap();
+
+    let session = session_for(root).await;
+    let project = project(root);
+    let ctx = OperationCtx {
+        project: &project,
+        session,
+    };
+
+    // Position on `x` in its declaration (line 2, col 12).
+    run_and_apply(
+        op("inline").as_ref(),
+        &ctx,
+        OperationRequest {
+            target: Target::Position {
+                file: PathBuf::from("Inl.java"),
+                position: Position::new(2, 12),
+            },
+            params: json!({}),
+        },
+        root,
+    )
+    .await;
+
+    let after = std::fs::read_to_string(root.join("Inl.java")).unwrap();
+    assert!(
+        !after.contains("int x = 5"),
+        "removed the declaration: {after}"
+    );
+    assert!(after.contains("return 5 + 1"), "inlined the value: {after}");
 }
