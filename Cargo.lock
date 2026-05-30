@@ -526,6 +526,7 @@ dependencies = [
 name = "henka-lsp"
 version = "0.0.0"
 dependencies = [
+ "henka-core",
  "serde",
  "serde_json",
  "thiserror",

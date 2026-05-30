@@ -1,9 +1,9 @@
-//! Mapping Eclipse JDT LS (LSP) responses into the core model.
+//! Mapping LSP responses into the core model.
 //!
-//! jdtls speaks LSP, which expresses positions in UTF-16 and returns edits as a
-//! `WorkspaceEdit` (either a `changes` map or `documentChanges`). These helpers
-//! convert those into the core [`WorkspaceEdit`] and into structured query
-//! results.
+//! Language servers speak LSP, which expresses positions in UTF-16 and returns
+//! edits as a `WorkspaceEdit` (either a `changes` map or `documentChanges`).
+//! These helpers convert those into the core [`WorkspaceEdit`] and into
+//! structured query results, so every LSP-backed provider shares one mapping.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use henka_core::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::error::{JavaError, Result};
+use crate::Result;
 
 #[derive(Debug, Deserialize)]
 struct LspPosition {
@@ -102,8 +102,7 @@ pub fn to_core_workspace_edit(value: Value) -> Result<WorkspaceEdit> {
     if value.is_null() {
         return Ok(WorkspaceEdit::empty());
     }
-    let lsp: LspWorkspaceEdit =
-        serde_json::from_value(value).map_err(|e| JavaError::Lsp(e.into()))?;
+    let lsp: LspWorkspaceEdit = serde_json::from_value(value)?;
 
     // Accumulate edits per file URI, preserving any file operations in order.
     let mut by_uri: BTreeMap<String, Vec<TextEdit>> = BTreeMap::new();
@@ -187,8 +186,7 @@ pub fn locations_to_query(value: Value, root: &Path) -> Result<Value> {
     if value.is_null() {
         return Ok(json!({ "usages": [] }));
     }
-    let locations: Vec<LspLocation> =
-        serde_json::from_value(value).map_err(|e| JavaError::Lsp(e.into()))?;
+    let locations: Vec<LspLocation> = serde_json::from_value(value)?;
 
     let usages: Vec<Value> = locations
         .into_iter()

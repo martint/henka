@@ -10,8 +10,9 @@ use henka_core::operation::{
 use henka_core::{Error as CoreError, Language, Position, Result as CoreResult};
 use serde_json::{Value, json};
 
+use henka_lsp::convert as lsp;
+
 use crate::jdtls::JdtlsSession;
-use crate::lsp;
 
 /// Downcast the operation's session to a jdtls session.
 fn jdtls<'a>(ctx: &'a OperationCtx<'_>) -> CoreResult<&'a JdtlsSession> {
