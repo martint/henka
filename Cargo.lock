@@ -686,6 +686,7 @@ dependencies = [
  "async-trait",
  "clap",
  "refactor-core",
+ "refactor-lang-java",
  "rmcp",
  "schemars",
  "serde",

@@ -3,6 +3,8 @@
 
 pub mod error;
 pub mod jdtls;
+pub mod lsp;
+pub mod operations;
 pub mod provider;
 
 pub use error::{JavaError, Result};

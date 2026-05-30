@@ -2,11 +2,29 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use refactor_lsp::LspClient;
 use serde_json::{Value, json};
 use tokio::process::Command;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, broadcast};
+use tokio::time::Duration;
+
+/// Upper bound on source files opened to index a loose-file project.
+const MAX_INDEX_FILES: usize = 2000;
+
+/// Directories not worth opening when indexing a project.
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    ".jj",
+    ".data",
+    "config",
+    "target",
+    "build",
+    "out",
+    "node_modules",
+    ".gradle",
+];
 
 use crate::error::{JavaError, Result};
 
@@ -135,6 +153,7 @@ pub struct JdtlsSession {
     client: LspClient,
     root: PathBuf,
     opened: Mutex<HashSet<PathBuf>>,
+    indexed: AtomicBool,
 }
 
 impl JdtlsSession {
@@ -175,8 +194,12 @@ impl JdtlsSession {
             client,
             root: root.to_path_buf(),
             opened: Mutex::new(HashSet::new()),
+            indexed: AtomicBool::new(false),
         };
+        // Subscribe before initializing so the readiness signal isn't missed.
+        let mut status = session.client.subscribe();
         session.initialize().await?;
+        wait_for_ready(&mut status).await;
         Ok(session)
     }
 
@@ -232,6 +255,65 @@ impl JdtlsSession {
             .await?;
         self.opened.lock().await.insert(abs);
         Ok(uri)
+    }
+
+    /// Ensure the project's sources are resolved before an operation reads from
+    /// them, done once per session.
+    ///
+    /// A build-tool project (Maven/Gradle) is fully indexed by jdtls's import,
+    /// so this is a safety net; but a loose-file ("invisible") project — or one
+    /// whose import failed (e.g. offline) — resolves files only as they are
+    /// opened. Opening the project's sources up front makes cross-file results
+    /// (rename, find-usages) complete in those cases too.
+    pub async fn ensure_indexed(&self) -> Result<()> {
+        if self.indexed.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        let files = collect_java_files(&self.root);
+        self.open_and_reconcile(&files).await
+    }
+
+    /// Open the given files (if not already open) and wait for jdtls to
+    /// reconcile each newly-opened one, signalled by a `publishDiagnostics`
+    /// notification. This makes the server resolve those files before a
+    /// subsequent request (e.g. a rename) reads from them.
+    pub async fn open_and_reconcile(&self, paths: &[PathBuf]) -> Result<()> {
+        // Subscribe before opening so reconcile signals aren't missed.
+        let mut events = self.client.subscribe();
+
+        let mut pending: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for path in paths {
+            let abs = if path.is_absolute() {
+                path.clone()
+            } else {
+                self.root.join(path)
+            };
+            let already_open = self.opened.lock().await.contains(&abs);
+            let uri = self.ensure_open(path).await?;
+            if !already_open {
+                pending.insert(uri);
+            }
+        }
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        let _ = tokio::time::timeout(Duration::from_secs(15), async {
+            while !pending.is_empty() {
+                match events.recv().await {
+                    Ok((method, params)) if method == "textDocument/publishDiagnostics" => {
+                        if let Some(uri) = params.get("uri").and_then(Value::as_str) {
+                            pending.remove(uri);
+                        }
+                    }
+                    Ok(_) => continue,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        })
+        .await;
+        Ok(())
     }
 
     /// Shut the server down.
@@ -296,6 +378,38 @@ impl JdtlsSession {
     }
 }
 
+/// How long to wait for jdtls to finish importing the project before serving
+/// requests. Reaching the deadline is non-fatal — requests may simply see an
+/// incomplete index until the import catches up.
+const READY_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Wait until jdtls reports it has finished importing the project, signalled by
+/// a `language/status` notification of type `Started`/`ServiceReady`.
+async fn wait_for_ready(status: &mut broadcast::Receiver<(String, Value)>) {
+    let waited = tokio::time::timeout(READY_TIMEOUT, async {
+        loop {
+            match status.recv().await {
+                Ok((method, params)) if method == "language/status" => {
+                    let kind = params
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if kind == "ServiceReady" {
+                        return;
+                    }
+                }
+                Ok(_) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    })
+    .await;
+    if waited.is_err() {
+        tracing::warn!("timed out waiting for jdtls to become ready; proceeding");
+    }
+}
+
 /// Convert an absolute path to a `file://` URI, percent-encoding the few
 /// characters that matter for typical source paths.
 fn path_to_file_uri(path: &Path) -> String {
@@ -309,6 +423,37 @@ fn path_to_file_uri(path: &Path) -> String {
         }
     }
     encoded
+}
+
+/// Collect up to [`MAX_INDEX_FILES`] `.java` files under `root`, skipping build
+/// and VCS directories.
+fn collect_java_files(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if out.len() >= MAX_INDEX_FILES {
+                return out;
+            }
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if !SKIP_DIRS.contains(&name.as_ref()) {
+                    stack.push(path);
+                }
+            } else if path.extension().is_some_and(|e| e == "java") {
+                out.push(path);
+            }
+        }
+    }
+    out
 }
 
 /// Recursively copy a directory tree.

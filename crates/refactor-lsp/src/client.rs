@@ -16,12 +16,15 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, broadcast, oneshot};
 
 use crate::error::{LspError, Result};
 use crate::framing::{read_message, write_message};
 
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value>>>>>;
+
+/// A server-to-client notification: its method and params.
+pub type Notification = (String, Value);
 
 /// A handle to a running language server.
 pub struct LspClient {
@@ -29,6 +32,7 @@ pub struct LspClient {
     next_id: AtomicI64,
     pending: Pending,
     child: Arc<Mutex<Child>>,
+    notifications: broadcast::Sender<Notification>,
 }
 
 impl LspClient {
@@ -54,16 +58,21 @@ impl LspClient {
 
         let stdin = Arc::new(Mutex::new(stdin));
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let (notifications, _) = broadcast::channel(256);
 
-        // Reader: route responses, answer server-to-client requests.
+        // Reader: route responses, answer server-to-client requests, broadcast
+        // notifications.
         {
             let stdin = Arc::clone(&stdin);
             let pending = Arc::clone(&pending);
+            let notifications = notifications.clone();
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stdout);
                 loop {
                     match read_message(&mut reader).await {
-                        Ok(Some(msg)) => handle_incoming(msg, &stdin, &pending).await,
+                        Ok(Some(msg)) => {
+                            handle_incoming(msg, &stdin, &pending, &notifications).await
+                        }
                         Ok(None) => break,
                         Err(e) => {
                             tracing::warn!(error = %e, "lsp read error");
@@ -90,7 +99,15 @@ impl LspClient {
             next_id: AtomicI64::new(1),
             pending,
             child: Arc::new(Mutex::new(child)),
+            notifications,
         })
+    }
+
+    /// Subscribe to server-to-client notifications. Subscribe before issuing
+    /// requests that trigger the notifications you care about, since only
+    /// notifications received after subscribing are delivered.
+    pub fn subscribe(&self) -> broadcast::Receiver<Notification> {
+        self.notifications.subscribe()
     }
 
     /// Send a request and await its typed result.
@@ -136,7 +153,12 @@ impl LspClient {
 
 /// Route an incoming message: response, server-to-client request, or
 /// notification.
-async fn handle_incoming(msg: Value, stdin: &Arc<Mutex<ChildStdin>>, pending: &Pending) {
+async fn handle_incoming(
+    msg: Value,
+    stdin: &Arc<Mutex<ChildStdin>>,
+    pending: &Pending,
+    notifications: &broadcast::Sender<Notification>,
+) {
     let is_response =
         msg.get("id").is_some() && (msg.get("result").is_some() || msg.get("error").is_some());
 
@@ -173,9 +195,11 @@ async fn handle_incoming(msg: Value, stdin: &Arc<Mutex<ChildStdin>>, pending: &P
         return;
     }
 
-    // Otherwise it's a notification.
+    // Otherwise it's a notification: broadcast it to any subscribers.
     if let Some(method) = msg.get("method").and_then(Value::as_str) {
         tracing::trace!(method, "lsp notification");
+        let params = msg.get("params").cloned().unwrap_or(Value::Null);
+        let _ = notifications.send((method.to_string(), params));
     }
 }
 

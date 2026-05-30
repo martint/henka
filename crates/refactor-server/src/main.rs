@@ -39,10 +39,21 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Assemble the language providers. The Java provider (and its operations) is
-/// added in a later phase; until then the catalog is empty.
+/// Assemble the language providers. A provider that cannot start (e.g. Java
+/// when no jdtls distribution is available) is logged and skipped, so the
+/// server still serves the languages that are ready.
 fn build_providers() -> ProviderRegistry {
-    ProviderRegistry::new()
+    let mut providers = ProviderRegistry::new();
+    match refactor_lang_java::JavaProvider::new() {
+        Ok(java) => {
+            tracing::info!("Java provider ready (jdtls located)");
+            providers.register(std::sync::Arc::new(java));
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Java provider unavailable; Java operations disabled");
+        }
+    }
+    providers
 }
 
 /// Initialize tracing to stderr — stdout is reserved for the MCP stdio channel.

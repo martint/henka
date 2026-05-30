@@ -11,6 +11,7 @@ license = "Apache-2.0"
 # Internal crates
 refactor-core = { path = "crates/refactor-core" }
 refactor-lsp = { path = "crates/refactor-lsp" }
+refactor-lang-java = { path = "crates/refactor-lang-java" }
 
 # External
 anyhow = "1"

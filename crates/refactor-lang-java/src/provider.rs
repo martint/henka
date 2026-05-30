@@ -14,6 +14,7 @@ use tokio::sync::Mutex;
 
 use crate::error::JavaError;
 use crate::jdtls::{JdtlsInstall, JdtlsSession, cache_base};
+use crate::operations::{FindUsagesOp, RenameOp};
 
 impl LanguageSession for JdtlsSession {
     fn language(&self) -> Language {
@@ -52,8 +53,7 @@ impl LanguageProvider for JavaProvider {
     }
 
     fn operations(&self) -> Vec<Arc<dyn Operation>> {
-        // Java operations are added in a later phase.
-        Vec::new()
+        vec![Arc::new(RenameOp), Arc::new(FindUsagesOp)]
     }
 
     async fn session(&self, project: &Project) -> CoreResult<Arc<dyn LanguageSession>> {

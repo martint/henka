@@ -21,6 +21,11 @@ pub enum JavaError {
     #[error("no Java runtime found; set JAVA_HOME or put `java` on PATH")]
     JavaNotFound,
 
+    /// The refactoring requires a file-level operation (create/rename/delete)
+    /// that the edit model does not yet support.
+    #[error("this refactoring requires a file {0} operation, which is not yet supported")]
+    UnsupportedFileOperation(String),
+
     /// The language server protocol failed.
     #[error(transparent)]
     Lsp(#[from] refactor_lsp::LspError),
