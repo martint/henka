@@ -15,6 +15,8 @@ use walkdir::WalkDir;
 pub enum Language {
     /// Java.
     Java,
+    /// Rust.
+    Rust,
 }
 
 impl Language {
@@ -22,6 +24,7 @@ impl Language {
     pub fn as_str(self) -> &'static str {
         match self {
             Language::Java => "java",
+            Language::Rust => "rust",
         }
     }
 
@@ -31,6 +34,7 @@ impl Language {
     pub fn from_path(path: &Path) -> Option<Language> {
         match path.extension().and_then(|e| e.to_str()) {
             Some("java") => Some(Language::Java),
+            Some("rs") => Some(Language::Rust),
             _ => None,
         }
     }
@@ -66,6 +70,7 @@ const MAX_WALK_ENTRIES: usize = 50_000;
 /// supported language has been found or the entry budget is exhausted.
 pub fn detect_languages(root: &Path) -> Vec<Language> {
     let mut found_java = false;
+    let mut found_rust = false;
     let mut walked = 0usize;
 
     let walker = WalkDir::new(root).into_iter().filter_entry(|entry| {
@@ -87,8 +92,11 @@ pub fn detect_languages(root: &Path) -> Vec<Language> {
             if is_java_marker(&name) {
                 found_java = true;
             }
+            if is_rust_marker(&name) {
+                found_rust = true;
+            }
         }
-        if found_java {
+        if found_java && found_rust {
             break;
         }
     }
@@ -96,6 +104,9 @@ pub fn detect_languages(root: &Path) -> Vec<Language> {
     let mut langs = Vec::new();
     if found_java {
         langs.push(Language::Java);
+    }
+    if found_rust {
+        langs.push(Language::Rust);
     }
     langs
 }
@@ -111,6 +122,11 @@ fn is_java_marker(name: &str) -> bool {
                 | "settings.gradle"
                 | "settings.gradle.kts"
         )
+}
+
+/// Whether a file name marks a Rust project or source file.
+fn is_rust_marker(name: &str) -> bool {
+    name.ends_with(".rs") || name == "Cargo.toml"
 }
 
 #[cfg(test)]
@@ -143,8 +159,31 @@ mod tests {
             Language::from_path(Path::new("src/Main.java")),
             Some(Language::Java)
         );
+        assert_eq!(
+            Language::from_path(Path::new("src/main.rs")),
+            Some(Language::Rust)
+        );
         assert_eq!(Language::from_path(Path::new("README.md")), None);
         assert_eq!(Language::from_path(Path::new("noext")), None);
+    }
+
+    #[test]
+    fn detects_rust_from_cargo_and_source() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"").unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+        assert_eq!(detect_languages(dir.path()), vec![Language::Rust]);
+    }
+
+    #[test]
+    fn detects_both_languages_in_one_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pom.xml"), "<project/>").unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"").unwrap();
+        let langs = detect_languages(dir.path());
+        assert!(langs.contains(&Language::Java), "{langs:?}");
+        assert!(langs.contains(&Language::Rust), "{langs:?}");
     }
 
     #[test]
