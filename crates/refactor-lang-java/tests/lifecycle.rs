@@ -33,7 +33,7 @@ async fn initializes_and_opens_a_file() {
     .unwrap();
 
     let data = root.join("data");
-    let session = JdtlsSession::start(&install, root, &data)
+    let session = JdtlsSession::start(&install, root, &data, &[])
         .await
         .expect("jdtls should initialize");
 

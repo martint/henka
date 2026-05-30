@@ -137,6 +137,26 @@ pub fn cache_base() -> PathBuf {
         .join("refactor-mcp")
 }
 
+/// Locate the refactoring delegate-command bundle jar, if built.
+///
+/// Searches `$REFACTOR_JDTLS_BUNDLE`, then `jdtls-bundle/` relative to the
+/// working directory, then the cache dir. Returns `None` if not found, in which
+/// case the parameterized refactorings (change-signature, move) are unavailable.
+pub fn locate_bundle() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("REFACTOR_JDTLS_BUNDLE") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    [
+        PathBuf::from("jdtls-bundle/refactor-jdtls-bundle.jar"),
+        cache_base().join("refactor-jdtls-bundle.jar"),
+    ]
+    .into_iter()
+    .find(|p| p.is_file())
+}
+
 /// The Java executable to launch jdtls with (`$JAVA_HOME/bin/java` or `java`).
 pub fn java_executable() -> String {
     if let Some(home) = std::env::var_os("JAVA_HOME") {
@@ -154,12 +174,19 @@ pub struct JdtlsSession {
     root: PathBuf,
     opened: Mutex<HashSet<PathBuf>>,
     indexed: AtomicBool,
+    bundles: Vec<String>,
 }
 
 impl JdtlsSession {
     /// Launch jdtls for `root`, using `data_dir` as its workspace data
-    /// directory, and perform the initialize handshake.
-    pub async fn start(install: &JdtlsInstall, root: &Path, data_dir: &Path) -> Result<Self> {
+    /// directory, loading the given extension `bundles` (jar paths), and
+    /// perform the initialize handshake.
+    pub async fn start(
+        install: &JdtlsInstall,
+        root: &Path,
+        data_dir: &Path,
+        bundles: &[PathBuf],
+    ) -> Result<Self> {
         let launcher = install.launcher_jar()?;
         let platform_config = install.platform_config()?;
 
@@ -195,6 +222,7 @@ impl JdtlsSession {
             root: root.to_path_buf(),
             opened: Mutex::new(HashSet::new()),
             indexed: AtomicBool::new(false),
+            bundles: bundles.iter().map(|p| p.display().to_string()).collect(),
         };
         // Subscribe before initializing so the readiness signal isn't missed.
         let mut status = session.client.subscribe();
@@ -365,6 +393,12 @@ impl JdtlsSession {
     /// capabilities that unlock its command-based refactorings.
     async fn initialize(&self) -> Result<()> {
         let root_uri = path_to_file_uri(&self.root);
+        let mut init_options = json!({
+            "extendedClientCapabilities": { "classFileContentsSupport": true }
+        });
+        if !self.bundles.is_empty() {
+            init_options["bundles"] = json!(self.bundles);
+        }
         let params = json!({
             "processId": std::process::id(),
             "rootUri": root_uri,
@@ -401,12 +435,10 @@ impl JdtlsSession {
             // CommandSupport, …). Those make jdtls delegate refactoring UI to
             // the client via client-side commands; without them, jdtls computes
             // the refactoring itself and returns the edit inline on the code
-            // action, which is what a headless client needs.
-            "initializationOptions": {
-                "extendedClientCapabilities": {
-                    "classFileContentsSupport": true
-                }
-            }
+            // action, which is what a headless client needs. The parameterized
+            // refactorings (change-signature, move) instead go through our own
+            // delegate-command bundle, loaded via `bundles` below.
+            "initializationOptions": init_options
         });
 
         let _: Value = self.client.request("initialize", params).await?;

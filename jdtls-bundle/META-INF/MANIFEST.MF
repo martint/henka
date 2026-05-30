@@ -1,0 +1,11 @@
+Manifest-Version: 1.0
+Bundle-ManifestVersion: 2
+Bundle-Name: Refactor MCP Delegate Commands
+Bundle-SymbolicName: dev.refactor.jdtls;singleton:=true
+Bundle-Version: 0.0.1
+Bundle-RequiredExecutionEnvironment: JavaSE-21
+Require-Bundle: org.eclipse.jdt.ls.core,
+ org.eclipse.core.runtime,
+ org.eclipse.lsp4j
+DynamicImport-Package: *
+Bundle-ActivationPolicy: lazy

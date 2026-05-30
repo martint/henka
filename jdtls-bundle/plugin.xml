@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?eclipse version="3.4"?>
+<plugin>
+   <extension point="org.eclipse.jdt.ls.core.delegateCommandHandler">
+      <delegateCommandHandler class="dev.refactor.jdtls.RefactorDelegateCommandHandler">
+         <command id="refactor.mcp.getRefactorEdit"/>
+         <command id="refactor.mcp.getMoveDestinations"/>
+         <command id="refactor.mcp.move"/>
+         <command id="refactor.mcp.getChangeSignatureInfo"/>
+      </delegateCommandHandler>
+   </extension>
+</plugin>

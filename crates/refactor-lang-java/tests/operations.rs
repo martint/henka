@@ -13,7 +13,7 @@ use refactor_core::operation::{
     Operation, OperationCtx, OperationOutcome, OperationRequest, Target,
 };
 use refactor_core::{EditApplier, Language, LanguageSession, Position, Project, Range};
-use refactor_lang_java::operations::{CodeActionOp, FindUsagesOp, RenameOp};
+use refactor_lang_java::operations::{ChangeSignatureOp, CodeActionOp, FindUsagesOp, RenameOp};
 use refactor_lang_java::{JdtlsInstall, JdtlsSession};
 use serde_json::json;
 
@@ -49,7 +49,13 @@ fn src(name: &str) -> PathBuf {
 async fn session_for(root: &Path) -> Arc<dyn LanguageSession> {
     let install = JdtlsInstall::at(jdtls_home()).expect("a jdtls distribution under .cache/jdtls");
     let data = root.join(".data");
-    let session = JdtlsSession::start(&install, root, &data)
+    // Load the delegate-command bundle when built, so parameterized refactorings
+    // (change-signature) are available.
+    let bundle = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("jdtls-bundle/refactor-jdtls-bundle.jar");
+    let bundles: Vec<PathBuf> = bundle.is_file().then_some(bundle).into_iter().collect();
+    let session = JdtlsSession::start(&install, root, &data, &bundles)
         .await
         .expect("jdtls should initialize");
     Arc::new(session)
@@ -209,6 +215,63 @@ async fn extract_variable_into_local() {
         "extracted a variable: {after}"
     );
     assert!(after.contains("return i"), "uses the variable: {after}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "launches a real jdtls JVM with the bundle; run with --ignored"]
+async fn change_signature_reorders_parameters() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("Greeting.java"),
+        "public class Greeting {\n    public int add(int a, int b) {\n        return a + b;\n    }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("Main.java"),
+        "public class Main {\n    void run() {\n        System.out.println(new Greeting().add(1, 2));\n    }\n}\n",
+    )
+    .unwrap();
+
+    let session = session_for(root).await;
+    let project = project(root);
+    let ctx = OperationCtx {
+        project: &project,
+        session,
+    };
+
+    // Method `add` is at line 1, char 15. Reorder params to (b, a).
+    let req = OperationRequest {
+        target: Target::Position {
+            file: PathBuf::from("Greeting.java"),
+            position: Position::new(1, 15),
+        },
+        params: json!({
+            "parameters": [
+                { "type": "int", "name": "b", "original_index": 1 },
+                { "type": "int", "name": "a", "original_index": 0 }
+            ]
+        }),
+    };
+
+    let outcome = ChangeSignatureOp
+        .run(&ctx, &req)
+        .await
+        .expect("change-signature should succeed");
+    let edit = match outcome {
+        OperationOutcome::Edit(edit) => edit,
+        _ => panic!("expected an edit"),
+    };
+    assert!(!edit.is_empty(), "expected a non-empty edit");
+    EditApplier::apply(&edit, root).expect("edit should apply");
+
+    let greeting = std::fs::read_to_string(root.join("Greeting.java")).unwrap();
+    let main = std::fs::read_to_string(root.join("Main.java")).unwrap();
+    assert!(
+        greeting.contains("add(int b, int a)"),
+        "declaration reordered: {greeting}"
+    );
+    assert!(main.contains("add(2, 1)"), "call site reordered: {main}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

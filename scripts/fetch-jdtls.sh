@@ -24,3 +24,11 @@ else
   echo "warning: launcher jar not found under $dest/plugins" >&2
   exit 1
 fi
+
+# Build the delegate-command bundle (parameterized refactorings) against the
+# freshly fetched jdtls, when its build script is present.
+bundle_build="$(dirname "$0")/../jdtls-bundle/build.sh"
+if [ -f "$bundle_build" ]; then
+  echo "building jdtls delegate-command bundle"
+  JDTLS_HOME="$dest" bash "$bundle_build"
+fi

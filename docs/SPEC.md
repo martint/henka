@@ -162,16 +162,15 @@ Modeled on the actions a developer reaches for in IntelliJ.
   return value.
 - **inline** — replace a variable or method with its definition.
 - **organize-imports** — sort and prune a file's imports.
-
-Heavier refactorings (**change-signature**, **move**) follow once the catalog above is solid.
+- **change-signature** — rename a method, change its return type or visibility, and reorder, add,
+  remove, or retype its parameters, updating every call site.
 
 Workspace edits may include **file operations** (create/rename/delete) in addition to text
 changes, so a refactoring that also moves or renames a file is applied as one unit.
 
-**Change-signature** and **move** are recognized IntelliJ refactorings but are not yet offered:
-the Java backend exposes them only through an interactive, client-delegated flow that requires
-parameters (a new signature, a destination) it will not compute headlessly. They remain roadmap
-rather than shipping as partial or incorrect edits.
+**Move** (a class to another package, a member to another type) is recognized but not yet offered
+as an operation: its destinations resolve only against a fully imported build project, so it
+awaits that path rather than shipping partial results.
 
 **Structural search-and-replace (edit):** match code by syntactic/semantic *shape* — not raw
 text — across the project, optionally rewriting each match to a new shape. Comments and string

@@ -1,2 +1,4 @@
 /target
 /.cache
+/jdtls-bundle/build
+/jdtls-bundle/refactor-jdtls-bundle.jar

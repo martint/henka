@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 
 use crate::error::JavaError;
 use crate::jdtls::{JdtlsInstall, JdtlsSession, cache_base};
-use crate::operations::{CodeActionOp, FindUsagesOp, RenameOp};
+use crate::operations::{ChangeSignatureOp, CodeActionOp, FindUsagesOp, RenameOp};
 
 #[async_trait]
 impl LanguageSession for JdtlsSession {
@@ -59,7 +59,11 @@ impl LanguageProvider for JavaProvider {
     }
 
     fn operations(&self) -> Vec<Arc<dyn Operation>> {
-        let mut ops: Vec<Arc<dyn Operation>> = vec![Arc::new(RenameOp), Arc::new(FindUsagesOp)];
+        let mut ops: Vec<Arc<dyn Operation>> = vec![
+            Arc::new(RenameOp),
+            Arc::new(FindUsagesOp),
+            Arc::new(ChangeSignatureOp),
+        ];
         ops.extend(CodeActionOp::java_set());
         ops
     }
@@ -78,8 +82,9 @@ impl LanguageProvider for JavaProvider {
 
         // Start outside the lock — jdtls startup is slow — then de-dup on insert.
         let data_dir = self.workspaces.join(&project.id).join(&revision);
+        let bundles: Vec<PathBuf> = crate::jdtls::locate_bundle().into_iter().collect();
         let session = Arc::new(
-            JdtlsSession::start(&self.install, &project.root, &data_dir)
+            JdtlsSession::start(&self.install, &project.root, &data_dir, &bundles)
                 .await
                 .map_err(|e| CoreError::Backend(e.to_string()))?,
         );
