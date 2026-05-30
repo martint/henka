@@ -462,6 +462,7 @@ mod tests {
                         new_text: text,
                     }],
                 }],
+                file_ops: Vec::new(),
             }))
         }
     }

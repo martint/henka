@@ -15,8 +15,8 @@ pub mod registry;
 pub mod vcs;
 
 pub use edit::{
-    AppliedEdit, EditApplier, FileDiff, FileEdit, Position, PositionEncoding, Range, TextEdit,
-    WorkspaceEdit,
+    AppliedEdit, EditApplier, FileDiff, FileEdit, FileOperation, Position, PositionEncoding, Range,
+    TextEdit, WorkspaceEdit,
 };
 pub use error::{Error, Result};
 pub use language::{Language, detect_languages};

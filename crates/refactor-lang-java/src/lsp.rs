@@ -8,7 +8,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use refactor_core::{FileEdit, Position, PositionEncoding, Range, TextEdit, WorkspaceEdit};
+use refactor_core::{
+    FileEdit, FileOperation, Position, PositionEncoding, Range, TextEdit, WorkspaceEdit,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -48,7 +50,15 @@ enum LspDocumentChange {
         edits: Vec<LspTextEdit>,
     },
     /// A resource operation (create/rename/delete) — carries a `kind`.
-    Resource { kind: String },
+    Resource {
+        kind: String,
+        #[serde(default)]
+        uri: Option<String>,
+        #[serde(rename = "oldUri", default)]
+        old_uri: Option<String>,
+        #[serde(rename = "newUri", default)]
+        new_uri: Option<String>,
+    },
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -86,11 +96,8 @@ impl From<LspTextEdit> for TextEdit {
     }
 }
 
-/// Convert an LSP `WorkspaceEdit` JSON value into the core model.
-///
-/// Fails if the edit includes file-level resource operations, which the edit
-/// model does not yet support (so a rename that would move a file is rejected
-/// rather than partially applied).
+/// Convert an LSP `WorkspaceEdit` JSON value into the core model, including any
+/// file-level resource operations (create/rename/delete).
 pub fn to_core_workspace_edit(value: Value) -> Result<WorkspaceEdit> {
     if value.is_null() {
         return Ok(WorkspaceEdit::empty());
@@ -98,8 +105,9 @@ pub fn to_core_workspace_edit(value: Value) -> Result<WorkspaceEdit> {
     let lsp: LspWorkspaceEdit =
         serde_json::from_value(value).map_err(|e| JavaError::Lsp(e.into()))?;
 
-    // Accumulate edits per file URI.
+    // Accumulate edits per file URI, preserving any file operations in order.
     let mut by_uri: BTreeMap<String, Vec<TextEdit>> = BTreeMap::new();
+    let mut file_ops: Vec<FileOperation> = Vec::new();
 
     if let Some(changes) = lsp.changes {
         for (uri, edits) in changes {
@@ -122,8 +130,15 @@ pub fn to_core_workspace_edit(value: Value) -> Result<WorkspaceEdit> {
                         .or_default()
                         .extend(edits.into_iter().map(TextEdit::from));
                 }
-                LspDocumentChange::Resource { kind } => {
-                    return Err(JavaError::UnsupportedFileOperation(kind));
+                LspDocumentChange::Resource {
+                    kind,
+                    uri,
+                    old_uri,
+                    new_uri,
+                } => {
+                    if let Some(op) = resource_op(&kind, uri, old_uri, new_uri) {
+                        file_ops.push(op);
+                    }
                 }
             }
         }
@@ -140,7 +155,30 @@ pub fn to_core_workspace_edit(value: Value) -> Result<WorkspaceEdit> {
     Ok(WorkspaceEdit {
         encoding: PositionEncoding::Utf16,
         files,
+        file_ops,
     })
+}
+
+/// Map an LSP resource operation to a core [`FileOperation`].
+fn resource_op(
+    kind: &str,
+    uri: Option<String>,
+    old_uri: Option<String>,
+    new_uri: Option<String>,
+) -> Option<FileOperation> {
+    match kind {
+        "create" => Some(FileOperation::Create {
+            path: uri_to_path(&uri?),
+        }),
+        "delete" => Some(FileOperation::Delete {
+            path: uri_to_path(&uri?),
+        }),
+        "rename" => Some(FileOperation::Rename {
+            from: uri_to_path(&old_uri?),
+            to: uri_to_path(&new_uri?),
+        }),
+        _ => None,
+    }
 }
 
 /// Convert an LSP `Location[]` response into a structured find-usages result,
@@ -240,14 +278,27 @@ mod tests {
     }
 
     #[test]
-    fn rejects_resource_operations() {
+    fn maps_rename_file_operation() {
         let value = json!({
             "documentChanges": [
+                {
+                    "textDocument": { "uri": "file:///proj/Old.java", "version": 1 },
+                    "edits": [
+                        { "range": {"start": {"line": 0, "character": 6}, "end": {"line": 0, "character": 9}}, "newText": "New" }
+                    ]
+                },
                 { "kind": "rename", "oldUri": "file:///proj/Old.java", "newUri": "file:///proj/New.java" }
             ]
         });
-        let err = to_core_workspace_edit(value).unwrap_err();
-        assert!(matches!(err, JavaError::UnsupportedFileOperation(_)));
+        let edit = to_core_workspace_edit(value).unwrap();
+        assert_eq!(edit.files.len(), 1);
+        assert_eq!(
+            edit.file_ops,
+            vec![FileOperation::Rename {
+                from: PathBuf::from("/proj/Old.java"),
+                to: PathBuf::from("/proj/New.java"),
+            }]
+        );
     }
 
     #[test]

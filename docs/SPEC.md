@@ -165,6 +165,14 @@ Modeled on the actions a developer reaches for in IntelliJ.
 
 Heavier refactorings (**change-signature**, **move**) follow once the catalog above is solid.
 
+Workspace edits may include **file operations** (create/rename/delete) in addition to text
+changes, so a refactoring that also moves or renames a file is applied as one unit.
+
+**Change-signature** and **move** are recognized IntelliJ refactorings but are not yet offered:
+the Java backend exposes them only through an interactive, client-delegated flow that requires
+parameters (a new signature, a destination) it will not compute headlessly. They remain roadmap
+rather than shipping as partial or incorrect edits.
+
 **Structural search-and-replace (edit):** match code by syntactic/semantic *shape* — not raw
 text — across the project, optionally rewriting each match to a new shape. Comments and string
 literals that merely contain the same characters do not match.

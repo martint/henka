@@ -75,13 +75,41 @@ pub struct FileEdit {
     pub edits: Vec<TextEdit>,
 }
 
-/// An ordered set of text changes across one or more files.
+/// A file-level operation that accompanies text edits (e.g. a rename
+/// refactoring that also renames the file holding a public class).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "lowercase")]
+pub enum FileOperation {
+    /// Create a new (empty) file.
+    Create {
+        /// Path to create.
+        path: PathBuf,
+    },
+    /// Rename or move a file.
+    Rename {
+        /// Existing path.
+        from: PathBuf,
+        /// New path.
+        to: PathBuf,
+    },
+    /// Delete a file.
+    Delete {
+        /// Path to delete.
+        path: PathBuf,
+    },
+}
+
+/// An ordered set of changes across one or more files: text edits plus any
+/// file-level operations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceEdit {
     /// How positions in this edit are counted.
     pub encoding: PositionEncoding,
-    /// Per-file edits.
+    /// Per-file text edits.
     pub files: Vec<FileEdit>,
+    /// File-level operations, applied after the text edits.
+    #[serde(default)]
+    pub file_ops: Vec<FileOperation>,
 }
 
 impl WorkspaceEdit {
@@ -90,12 +118,13 @@ impl WorkspaceEdit {
         Self {
             encoding: PositionEncoding::Utf16,
             files: Vec::new(),
+            file_ops: Vec::new(),
         }
     }
 
     /// Whether this edit changes nothing.
     pub fn is_empty(&self) -> bool {
-        self.files.iter().all(|f| f.edits.is_empty())
+        self.files.iter().all(|f| f.edits.is_empty()) && self.file_ops.is_empty()
     }
 }
 
@@ -129,6 +158,9 @@ impl EditApplier {
             let diff = unified_diff(&original, &updated, &rel);
             diffs.push(FileDiff { path: rel, diff });
         }
+        for op in &edit.file_ops {
+            diffs.push(file_op_diff(op, root));
+        }
         Ok(diffs)
     }
 
@@ -149,6 +181,39 @@ impl EditApplier {
         for (abs, rel, updated) in planned {
             std::fs::write(&abs, updated)?;
             changed_files.push(rel);
+        }
+
+        // File-level operations run after text edits, so edits to a file that
+        // is about to be renamed land before the rename.
+        for op in &edit.file_ops {
+            match op {
+                FileOperation::Create { path } => {
+                    let abs = resolve_path(path, root);
+                    if !abs.exists() {
+                        if let Some(parent) = abs.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::write(&abs, "")?;
+                    }
+                    changed_files.push(relativize(path, root));
+                }
+                FileOperation::Rename { from, to } => {
+                    let from_abs = resolve_path(from, root);
+                    let to_abs = resolve_path(to, root);
+                    if let Some(parent) = to_abs.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::rename(&from_abs, &to_abs)?;
+                    changed_files.push(relativize(to, root));
+                }
+                FileOperation::Delete { path } => {
+                    let abs = resolve_path(path, root);
+                    if abs.exists() {
+                        std::fs::remove_file(&abs)?;
+                    }
+                    changed_files.push(relativize(path, root));
+                }
+            }
         }
         Ok(AppliedEdit { changed_files })
     }
@@ -264,6 +329,37 @@ fn relativize(path: &Path, root: &Path) -> PathBuf {
     abs.strip_prefix(root).map(Path::to_path_buf).unwrap_or(abs)
 }
 
+/// Describe a file operation as a one-line diff entry for previews.
+fn file_op_diff(op: &FileOperation, root: &Path) -> FileDiff {
+    match op {
+        FileOperation::Create { path } => {
+            let rel = relativize(path, root);
+            FileDiff {
+                diff: format!("create {}", rel.display()),
+                path: rel,
+            }
+        }
+        FileOperation::Rename { from, to } => {
+            let rel_to = relativize(to, root);
+            FileDiff {
+                diff: format!(
+                    "rename {} -> {}",
+                    relativize(from, root).display(),
+                    rel_to.display()
+                ),
+                path: rel_to,
+            }
+        }
+        FileOperation::Delete { path } => {
+            let rel = relativize(path, root);
+            FileDiff {
+                diff: format!("delete {}", rel.display()),
+                path: rel,
+            }
+        }
+    }
+}
+
 /// Produce a unified diff between two texts, labeled with the file path.
 fn unified_diff(original: &str, updated: &str, path: &Path) -> String {
     if original == updated {
@@ -292,6 +388,7 @@ mod tests {
                 path: root.join(name),
                 edits,
             }],
+            file_ops: Vec::new(),
         }
     }
 
@@ -403,6 +500,36 @@ mod tests {
         assert_eq!(diffs[0].path, PathBuf::from("a.txt"));
         assert!(diffs[0].diff.contains("-hello world"));
         assert!(diffs[0].diff.contains("+hello there"));
+    }
+
+    #[test]
+    fn applies_text_edit_then_renames_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("Greeting.java");
+        std::fs::write(&old, "class Greeting {}\n").unwrap();
+
+        let edit = WorkspaceEdit {
+            encoding: PositionEncoding::Utf16,
+            files: vec![FileEdit {
+                path: old.clone(),
+                edits: vec![TextEdit {
+                    range: Range::new(pos(0, 6), pos(0, 14)),
+                    new_text: "Salutation".into(),
+                }],
+            }],
+            file_ops: vec![FileOperation::Rename {
+                from: old.clone(),
+                to: dir.path().join("Salutation.java"),
+            }],
+        };
+
+        EditApplier::apply(&edit, dir.path()).unwrap();
+        assert!(!old.exists(), "old file removed");
+        let new = dir.path().join("Salutation.java");
+        assert_eq!(
+            std::fs::read_to_string(&new).unwrap(),
+            "class Salutation {}\n"
+        );
     }
 
     #[test]
