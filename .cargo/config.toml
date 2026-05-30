@@ -1,0 +1,4 @@
+# Defines the `xtask` alias so `cargo xtask <subcommand>` works. Built in release
+# so repeated invocations are instant once the helper crate is cached.
+[alias]
+xtask = "run --package xtask --release --quiet --"

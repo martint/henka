@@ -1,0 +1,16 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+# No dependencies on purpose: xtask only sequences the existing build scripts and
+# cargo, so everything it needs lives in std. Keeping it dependency-free means a
+# fresh checkout runs `cargo xtask` without first compiling a crate graph.
+[dependencies]
