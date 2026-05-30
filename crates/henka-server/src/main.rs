@@ -115,6 +115,15 @@ fn build_providers() -> ProviderRegistry {
             tracing::warn!(error = %e, "Java provider unavailable; Java operations disabled");
         }
     }
+    match henka_lang_rust::RustProvider::new() {
+        Ok(rust) => {
+            tracing::info!("Rust provider ready (rust-analyzer located)");
+            providers.register(std::sync::Arc::new(rust));
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Rust provider unavailable; Rust operations disabled");
+        }
+    }
     providers
 }
 
