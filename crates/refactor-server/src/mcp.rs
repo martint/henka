@@ -234,6 +234,9 @@ impl RefactorMcp {
                     ok_json(&json!({ "dry_run": true, "files": files }))
                 } else {
                     let applied = EditApplier::apply(&edit, &project.root).map_err(into_mcp)?;
+                    // Keep the session's view current so later operations in
+                    // this session see the applied changes.
+                    ctx.session.sync_changed(&applied.changed_files).await;
                     ok_json(&json!({ "dry_run": false, "applied": applied }))
                 }
             }

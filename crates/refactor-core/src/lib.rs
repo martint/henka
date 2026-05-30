@@ -12,6 +12,7 @@ pub mod operation;
 pub mod project;
 pub mod provider;
 pub mod registry;
+pub mod vcs;
 
 pub use edit::{
     AppliedEdit, EditApplier, FileDiff, FileEdit, Position, PositionEncoding, Range, TextEdit,
@@ -26,3 +27,4 @@ pub use operation::{
 pub use project::{Project, validate_project_id};
 pub use provider::{LanguageProvider, LanguageSession, ProviderRegistry};
 pub use registry::{ProjectRegistry, default_config_path};
+pub use vcs::{Revision, Vcs, detect_revision};

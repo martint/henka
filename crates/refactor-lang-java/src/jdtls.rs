@@ -316,6 +316,45 @@ impl JdtlsSession {
         Ok(())
     }
 
+    /// Sync files that changed on disk (after an edit was applied) into the
+    /// server: any that were open are closed so jdtls re-reads them from disk,
+    /// and a watched-files change is announced so the index updates.
+    pub async fn sync_changed_impl(&self, changed: &[PathBuf]) {
+        let mut to_close = Vec::new();
+        let mut watch = Vec::new();
+        {
+            let mut opened = self.opened.lock().await;
+            for path in changed {
+                let abs = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    self.root.join(path)
+                };
+                let uri = path_to_file_uri(&abs);
+                if opened.remove(&abs) {
+                    to_close.push(uri.clone());
+                }
+                watch.push(json!({ "uri": uri, "type": 2 })); // 2 = Changed
+            }
+        }
+        for uri in to_close {
+            let _ = self
+                .client
+                .notify(
+                    "textDocument/didClose",
+                    json!({ "textDocument": { "uri": uri } }),
+                )
+                .await;
+        }
+        let _ = self
+            .client
+            .notify(
+                "workspace/didChangeWatchedFiles",
+                json!({ "changes": watch }),
+            )
+            .await;
+    }
+
     /// Shut the server down.
     pub async fn shutdown(&self) -> Result<()> {
         self.client.shutdown().await?;

@@ -22,12 +22,17 @@ use crate::project::Project;
 /// The trait itself is deliberately minimal; concrete providers expose their
 /// real capabilities on the underlying type, which operations reach via
 /// [`as_any`](LanguageSession::as_any) and downcasting.
+#[async_trait]
 pub trait LanguageSession: Send + Sync {
     /// The language this session serves.
     fn language(&self) -> Language;
 
     /// Access the concrete session type for downcasting.
     fn as_any(&self) -> &dyn Any;
+
+    /// Inform the session that the given files changed on disk (e.g. after an
+    /// edit was applied), so it can refresh its model. Default: no-op.
+    async fn sync_changed(&self, _changed: &[std::path::PathBuf]) {}
 }
 
 /// Supplies semantic understanding and operations for one language.

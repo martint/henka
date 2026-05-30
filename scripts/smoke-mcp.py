@@ -81,6 +81,14 @@ def main():
     assert ".greeting()" in main_after, main_after
     assert "String greeting()" in greeting_after, greeting_after
 
+    # After applying, the session must see the new state: find-usages of the
+    # renamed symbol should still resolve (this returned 0 before edit-sync).
+    print("--- find-usages of greeting (after apply) ---")
+    after = tool(8, "find-usages", {"project":"demo","file":"Greeting.java",
+                                    "line":1,"character":18})
+    print("USAGES:", json.dumps(after, indent=2))
+    assert after.get("count", 0) >= 1, "session should reflect applied rename"
+
     p.terminate()
     print("\nOK: end-to-end rename + find-usages through MCP succeeded")
 
