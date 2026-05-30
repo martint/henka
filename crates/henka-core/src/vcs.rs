@@ -4,8 +4,10 @@
 //! warm index rather than rebuilding it. This module reads the current revision
 //! from jujutsu or git; it never mutates the repository.
 
+use std::collections::hash_map::DefaultHasher;
 use std::fmt;
-use std::path::Path;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The version-control system backing a project.
@@ -101,6 +103,79 @@ pub fn detect_revision(root: &Path) -> Option<Revision> {
     None
 }
 
+/// A canonical identity for a repository, shared by all of its working copies
+/// (git worktrees, jj workspaces).
+///
+/// Two directories that are different checkouts of the same repository resolve
+/// to the same `RepoId`, which lets the server keep one semantic index per
+/// repository instead of one per checkout.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RepoId {
+    /// Which VCS the identity was derived from.
+    pub vcs: Vcs,
+    /// The canonical identity path: the git common directory or the jj repo
+    /// directory.
+    pub path: PathBuf,
+}
+
+impl RepoId {
+    /// A stable, filesystem-safe slug for use as a directory name (e.g. a data
+    /// directory). Derived from a hash of the identity path so it never
+    /// contains path separators or case-sensitive surprises.
+    pub fn slug(&self) -> String {
+        let mut hasher = DefaultHasher::new();
+        self.path.hash(&mut hasher);
+        format!("{}-{:016x}", self.vcs, hasher.finish())
+    }
+}
+
+/// Resolve the identity of the repository containing `path`, or `None` if it is
+/// not a jj or git repository (or the VCS tool is unavailable).
+///
+/// jj is preferred when both are present (a colocated repo), matching
+/// [`detect_revision`]. Detection is read-only.
+pub fn repo_identity(path: &Path) -> Option<RepoId> {
+    if path.join(".jj").is_dir()
+        && let Some(repo) = jj_repo_dir(path)
+    {
+        return Some(RepoId {
+            vcs: Vcs::Jj,
+            path: repo,
+        });
+    }
+
+    if path.join(".git").exists() {
+        let common = run(path, "git", &["rev-parse", "--git-common-dir"])?;
+        let common = common.trim();
+        let abs = if Path::new(common).is_absolute() {
+            PathBuf::from(common)
+        } else {
+            path.join(common)
+        };
+        return Some(RepoId {
+            vcs: Vcs::Git,
+            path: abs.canonicalize().unwrap_or(abs),
+        });
+    }
+
+    None
+}
+
+/// Resolve a working copy's `.jj/repo` to the shared repo directory. For the
+/// default workspace this is a directory; for a secondary workspace it is a
+/// file whose contents point at the main repo's `.jj/repo`.
+fn jj_repo_dir(root: &Path) -> Option<PathBuf> {
+    let repo = root.join(".jj").join("repo");
+    let resolved = if repo.is_file() {
+        // A secondary workspace: the file holds the path to the real repo dir.
+        let target = std::fs::read_to_string(&repo).ok()?;
+        PathBuf::from(target.trim())
+    } else {
+        repo
+    };
+    Some(resolved.canonicalize().unwrap_or(resolved))
+}
+
 /// Run a VCS command in `root`, returning its trimmed stdout on success.
 fn run(root: &Path, program: &str, args: &[&str]) -> Option<String> {
     let output = Command::new(program)
@@ -122,6 +197,88 @@ mod tests {
     fn no_vcs_returns_none() {
         let dir = tempfile::tempdir().unwrap();
         assert!(detect_revision(dir.path()).is_none());
+    }
+
+    #[test]
+    fn repo_identity_none_without_vcs() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(repo_identity(dir.path()).is_none());
+    }
+
+    #[test]
+    fn slug_is_stable_and_path_safe() {
+        let id = RepoId {
+            vcs: Vcs::Git,
+            path: PathBuf::from("/some/repo/.git"),
+        };
+        let slug = id.slug();
+        assert_eq!(slug, id.slug(), "slug is stable for the same identity");
+        assert!(slug.starts_with("git-"));
+        assert!(!slug.contains('/'));
+    }
+
+    /// Initialize a git repo with one commit at `root`; returns false (so the
+    /// test can early-return) if git is unavailable.
+    fn git_init_commit(root: &Path) -> bool {
+        let ok = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            return false;
+        }
+        for args in [
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            Command::new("git")
+                .args(&args)
+                .current_dir(root)
+                .status()
+                .unwrap();
+        }
+        std::fs::write(root.join("a.txt"), "x").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-q", "-m", "init"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        true
+    }
+
+    #[test]
+    fn git_worktrees_share_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        if !git_init_commit(&main) {
+            return;
+        }
+        let wt = dir.path().join("wt");
+        let added = Command::new("git")
+            .args(["worktree", "add", "-q", wt.to_str().unwrap()])
+            .current_dir(&main)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !added {
+            return;
+        }
+
+        let main_id = repo_identity(&main).expect("main identity");
+        let wt_id = repo_identity(&wt).expect("worktree identity");
+        assert_eq!(main_id.vcs, Vcs::Git);
+        assert_eq!(
+            main_id, wt_id,
+            "a worktree shares its main checkout's repo identity"
+        );
     }
 
     #[test]
