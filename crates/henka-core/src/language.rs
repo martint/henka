@@ -17,6 +17,10 @@ pub enum Language {
     Java,
     /// Rust.
     Rust,
+    /// TypeScript.
+    TypeScript,
+    /// JavaScript.
+    JavaScript,
 }
 
 impl Language {
@@ -25,6 +29,8 @@ impl Language {
         match self {
             Language::Java => "java",
             Language::Rust => "rust",
+            Language::TypeScript => "typescript",
+            Language::JavaScript => "javascript",
         }
     }
 
@@ -35,6 +41,8 @@ impl Language {
         match path.extension().and_then(|e| e.to_str()) {
             Some("java") => Some(Language::Java),
             Some("rs") => Some(Language::Rust),
+            Some("ts" | "tsx" | "mts" | "cts") => Some(Language::TypeScript),
+            Some("js" | "jsx" | "mjs" | "cjs") => Some(Language::JavaScript),
             _ => None,
         }
     }
@@ -71,6 +79,8 @@ const MAX_WALK_ENTRIES: usize = 50_000;
 pub fn detect_languages(root: &Path) -> Vec<Language> {
     let mut found_java = false;
     let mut found_rust = false;
+    let mut found_ts = false;
+    let mut found_js = false;
     let mut walked = 0usize;
 
     let walker = WalkDir::new(root).into_iter().filter_entry(|entry| {
@@ -89,14 +99,12 @@ pub fn detect_languages(root: &Path) -> Vec<Language> {
         }
         if entry.file_type().is_file() {
             let name = entry.file_name().to_string_lossy();
-            if is_java_marker(&name) {
-                found_java = true;
-            }
-            if is_rust_marker(&name) {
-                found_rust = true;
-            }
+            found_java |= is_java_marker(&name);
+            found_rust |= is_rust_marker(&name);
+            found_ts |= is_typescript_marker(&name);
+            found_js |= is_javascript_marker(&name);
         }
-        if found_java && found_rust {
+        if found_java && found_rust && found_ts && found_js {
             break;
         }
     }
@@ -107,6 +115,12 @@ pub fn detect_languages(root: &Path) -> Vec<Language> {
     }
     if found_rust {
         langs.push(Language::Rust);
+    }
+    if found_ts {
+        langs.push(Language::TypeScript);
+    }
+    if found_js {
+        langs.push(Language::JavaScript);
     }
     langs
 }
@@ -127,6 +141,21 @@ fn is_java_marker(name: &str) -> bool {
 /// Whether a file name marks a Rust project or source file.
 fn is_rust_marker(name: &str) -> bool {
     name.ends_with(".rs") || name == "Cargo.toml"
+}
+
+/// Whether a file name marks a TypeScript project or source file.
+fn is_typescript_marker(name: &str) -> bool {
+    name == "tsconfig.json"
+        || [".ts", ".tsx", ".mts", ".cts"]
+            .iter()
+            .any(|ext| name.ends_with(ext))
+}
+
+/// Whether a file name marks a JavaScript source file.
+fn is_javascript_marker(name: &str) -> bool {
+    [".js", ".jsx", ".mjs", ".cjs"]
+        .iter()
+        .any(|ext| name.ends_with(ext))
 }
 
 #[cfg(test)]
@@ -163,8 +192,35 @@ mod tests {
             Language::from_path(Path::new("src/main.rs")),
             Some(Language::Rust)
         );
+        assert_eq!(
+            Language::from_path(Path::new("src/app.ts")),
+            Some(Language::TypeScript)
+        );
+        assert_eq!(
+            Language::from_path(Path::new("src/app.tsx")),
+            Some(Language::TypeScript)
+        );
+        assert_eq!(
+            Language::from_path(Path::new("src/app.js")),
+            Some(Language::JavaScript)
+        );
+        assert_eq!(
+            Language::from_path(Path::new("src/app.mjs")),
+            Some(Language::JavaScript)
+        );
         assert_eq!(Language::from_path(Path::new("README.md")), None);
         assert_eq!(Language::from_path(Path::new("noext")), None);
+    }
+
+    #[test]
+    fn detects_typescript_and_javascript() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tsconfig.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("app.ts"), "export const x = 1;").unwrap();
+        std::fs::write(dir.path().join("util.js"), "module.exports = {};").unwrap();
+        let langs = detect_languages(dir.path());
+        assert!(langs.contains(&Language::TypeScript), "{langs:?}");
+        assert!(langs.contains(&Language::JavaScript), "{langs:?}");
     }
 
     #[test]

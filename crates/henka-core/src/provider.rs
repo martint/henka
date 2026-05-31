@@ -114,17 +114,33 @@ impl ProviderRegistry {
         self.providers.insert(provider.language(), provider);
     }
 
+    /// Register one provider for several languages — e.g. a single backend that
+    /// serves both TypeScript and JavaScript.
+    pub fn register_for(&mut self, languages: &[Language], provider: Arc<dyn LanguageProvider>) {
+        for &language in languages {
+            self.providers.insert(language, Arc::clone(&provider));
+        }
+    }
+
     /// The provider for a language, if registered.
     pub fn get(&self, language: Language) -> Option<Arc<dyn LanguageProvider>> {
         self.providers.get(&language).map(Arc::clone)
     }
 
-    /// Every operation contributed by every registered provider.
+    /// Every operation contributed by every registered provider. A provider
+    /// registered for several languages is asked once.
     pub fn operations(&self) -> Vec<Arc<dyn Operation>> {
-        self.providers
-            .values()
-            .flat_map(|p| p.operations())
-            .collect()
+        let mut seen: Vec<*const ()> = Vec::new();
+        let mut ops = Vec::new();
+        for provider in self.providers.values() {
+            let id = Arc::as_ptr(provider) as *const ();
+            if seen.contains(&id) {
+                continue;
+            }
+            seen.push(id);
+            ops.extend(provider.operations());
+        }
+        ops
     }
 
     /// The languages with a registered provider.
