@@ -3,14 +3,14 @@
 Structured, semantics-aware code refactorings for AI agents, spoken over [MCP](https://modelcontextprotocol.io) — real refactorings computed by the language's own toolchain, not text munging.
 
 - **Refactorings, not string edits.** Rename, extract, inline, change-signature, organize-imports, find-usages — computed by the language's real compiler view (Eclipse JDT for Java), so they hold across files and overloads. Every edit comes back as a diff you can preview before anything touches disk.
-- **One server, many projects.** Henka is multi-tenant: register repositories and operate on them in place. Operations are contributed per language — **Java** (via Eclipse JDT) and **Rust** (via rust-analyzer) so far — and the language servers are bundled, so there's nothing extra to install.
+- **One server, many projects.** Henka is multi-tenant: register repositories and operate on them in place. Operations are contributed per language — **Java** (via Eclipse JDT), **Rust** (via rust-analyzer), and **TypeScript/JavaScript** (via typescript-language-server) — and the language servers are bundled, so there's nothing extra to install.
 - **Worktree- and workspace-aware.** One warm index per repository, shared across git worktrees and `jj` workspaces. A refactoring lands in whichever working copy you name; the others are untouched.
 
 The full specification is in [`docs/SPEC.md`](docs/SPEC.md).
 
 ## Build and run
 
-Build the release binary (this also bundles the language servers it drives — fetching rust-analyzer and the Java language server, and building the latter's delegate-command bundle):
+Build the release binary (this also bundles the language servers it drives — fetching rust-analyzer, the Java language server, and typescript-language-server, and building the Java delegate-command bundle):
 
 ```sh
 cargo xtask build          # -> target/release/henka
@@ -51,7 +51,7 @@ When a project spans several working copies, a call may also name a `workspace` 
 
 ## Using it with agents (MCP)
 
-Henka exposes a handful of tenancy tools — `register_project`, `unregister_project`, `list_projects`, `project_status`, `list_operations` — plus one tool per operation, routed to the backend for the target file's language. Java offers `rename`, `find-usages`, `change-signature`, `extract-variable`, `extract-constant`, `extract-field`, `extract-method`, `inline`, and `organize-imports`; Rust offers `rename`, `find-usages`, `extract-variable`, `extract-constant`, `extract-function`, and `inline`.
+Henka exposes a handful of tenancy tools — `register_project`, `unregister_project`, `list_projects`, `project_status`, `list_operations` — plus one tool per operation, routed to the backend for the target file's language. Java offers `rename`, `find-usages`, `change-signature`, `extract-variable`, `extract-constant`, `extract-field`, `extract-method`, `inline`, and `organize-imports`; Rust offers `rename`, `find-usages`, `extract-variable`, `extract-constant`, `extract-function`, and `inline`; TypeScript/JavaScript offers `rename`, `find-usages`, `extract-constant`, and `extract-function`.
 
 Wire it into [Claude Code](https://claude.com/claude-code) over **stdio** (no network, no auth surface):
 
@@ -78,6 +78,7 @@ A Cargo workspace of focused crates:
 | `henka-lsp` | A minimal LSP client plus the reusable `LspSession` (open/index/overlay/sync) every backend shares. |
 | `henka-lang-java` | The Java provider: launches and drives Eclipse JDT LS (`jdtls`) and contributes the Java operations. |
 | `henka-lang-rust` | The Rust provider: launches and drives rust-analyzer and contributes the Rust operations. |
+| `henka-lang-ts` | The TypeScript/JavaScript provider: launches and drives typescript-language-server (serving both languages) and contributes their operations. |
 | `henka-server` | The MCP server binary: the dynamic tool catalog, request dispatch, and the stdio / HTTP transports. |
 | `xtask` | Build automation, invoked as `cargo xtask`. |
 
