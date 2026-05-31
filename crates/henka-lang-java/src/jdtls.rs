@@ -207,7 +207,7 @@ impl JdtlsSession {
         initialize(&client, root, &bundles).await?;
         wait_for_ready(&mut status).await;
         Ok(Self {
-            session: LspSession::new(client, root, "java", &["java"]),
+            session: LspSession::new(client, root, &[("java", "java")]),
         })
     }
 

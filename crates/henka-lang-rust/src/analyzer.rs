@@ -88,7 +88,7 @@ impl RaSession {
         initialize(&client, root).await?;
         wait_for_ready(&mut status).await;
         Ok(Self {
-            session: LspSession::new(client, root, "rust", &["rs"]),
+            session: LspSession::new(client, root, &[("rs", "rust")]),
         })
     }
 

@@ -51,10 +51,10 @@ struct OverlayState {
 pub struct LspSession {
     client: LspClient,
     root: PathBuf,
-    /// The LSP `languageId` to tag opened documents with (e.g. `java`, `rust`).
-    language_id: String,
-    /// Source file extensions to index and overlay (e.g. `java`, `rs`).
-    extensions: Vec<String>,
+    /// The source extensions this session indexes, each mapped to the LSP
+    /// `languageId` to tag documents of that extension with — e.g.
+    /// `("java", "java")` or `("tsx", "typescriptreact")`.
+    langs: Vec<(String, String)>,
     opened: Mutex<HashSet<PathBuf>>,
     indexed: AtomicBool,
     /// Serializes requests so a working-copy overlay stays coherent.
@@ -69,14 +69,17 @@ pub struct LspSession {
 }
 
 impl LspSession {
-    /// Wrap an already-initialized client. `language_id` tags opened documents;
-    /// `extensions` are the source extensions to index and overlay.
-    pub fn new(client: LspClient, root: &Path, language_id: &str, extensions: &[&str]) -> Self {
+    /// Wrap an already-initialized client. `langs` maps each source extension
+    /// this session indexes to the LSP `languageId` documents of that extension
+    /// are opened with.
+    pub fn new(client: LspClient, root: &Path, langs: &[(&str, &str)]) -> Self {
         Self {
             client,
             root: root.to_path_buf(),
-            language_id: language_id.to_string(),
-            extensions: extensions.iter().map(|e| e.to_string()).collect(),
+            langs: langs
+                .iter()
+                .map(|(ext, id)| (ext.to_string(), id.to_string()))
+                .collect(),
             opened: Mutex::new(HashSet::new()),
             indexed: AtomicBool::new(false),
             request: Arc::new(Mutex::new(())),
@@ -123,20 +126,32 @@ impl LspSession {
         }
 
         let text = std::fs::read_to_string(&abs)?;
-        self.did_open(&uri, &text).await?;
+        self.did_open(&uri, self.language_id_for(&abs), &text).await?;
         self.opened.lock().await.insert(abs);
         Ok(uri)
     }
 
+    /// The LSP `languageId` for a path, by its extension; falls back to the
+    /// first configured language when the extension is unknown.
+    fn language_id_for(&self, path: &Path) -> &str {
+        let ext = path.extension().and_then(|e| e.to_str());
+        self.langs
+            .iter()
+            .find(|(e, _)| Some(e.as_str()) == ext)
+            .or_else(|| self.langs.first())
+            .map(|(_, id)| id.as_str())
+            .unwrap_or("plaintext")
+    }
+
     /// Notify the server that `uri` is open with the given `text`.
-    async fn did_open(&self, uri: &str, text: &str) -> Result<()> {
+    async fn did_open(&self, uri: &str, language_id: &str, text: &str) -> Result<()> {
         self.client
             .notify(
                 "textDocument/didOpen",
                 json!({
                     "textDocument": {
                         "uri": uri,
-                        "languageId": self.language_id,
+                        "languageId": language_id,
                         "version": 1,
                         "text": text,
                     }
@@ -180,7 +195,7 @@ impl LspSession {
         if self.indexed.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
-        let files = collect_source_files(&self.root, &self.extensions);
+        let files = collect_source_files(&self.root, |p| self.indexes(p));
         self.open_and_reconcile(&files).await
     }
 
@@ -296,7 +311,8 @@ impl LspSession {
                 self.did_change_full(&uri, &content).await?;
                 self.overlay.lock().await.changed.insert(base_abs);
             } else {
-                self.did_open(&uri, &content).await?;
+                self.did_open(&uri, self.language_id_for(&base_abs), &content)
+                    .await?;
                 self.opened.lock().await.insert(base_abs.clone());
                 self.overlay.lock().await.opened.insert(base_abs);
             }
@@ -344,7 +360,7 @@ impl LspSession {
     fn indexes(&self, path: &Path) -> bool {
         path.extension()
             .and_then(|e| e.to_str())
-            .is_some_and(|e| self.extensions.iter().any(|x| x == e))
+            .is_some_and(|e| self.langs.iter().any(|(ext, _)| ext == e))
     }
 }
 
@@ -363,9 +379,9 @@ pub fn path_to_file_uri(path: &Path) -> String {
     encoded
 }
 
-/// Collect up to [`MAX_INDEX_FILES`] files with one of `extensions` under
-/// `root`, skipping build and VCS directories.
-fn collect_source_files(root: &Path, extensions: &[String]) -> Vec<PathBuf> {
+/// Collect up to [`MAX_INDEX_FILES`] files under `root` for which `wanted`
+/// returns true, skipping build and VCS directories.
+fn collect_source_files(root: &Path, wanted: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -386,11 +402,7 @@ fn collect_source_files(root: &Path, extensions: &[String]) -> Vec<PathBuf> {
                 if !SKIP_DIRS.contains(&name.as_ref()) {
                     stack.push(path);
                 }
-            } else if path
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| extensions.iter().any(|x| x == e))
-            {
+            } else if wanted(&path) {
                 out.push(path);
             }
         }
