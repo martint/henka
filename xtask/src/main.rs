@@ -25,6 +25,7 @@ commands:
   jdtls           fetch the jdtls distribution into .cache/jdtls
   bundle          compile the jdtls delegate-command bundle
   rust-analyzer   fetch the rust-analyzer binary into .cache/rust-analyzer
+  typescript      install typescript-language-server into .cache/typescript-language-server
 ";
 
 fn main() {
@@ -35,6 +36,7 @@ fn main() {
         "jdtls" => cmd_jdtls(),
         "bundle" => cmd_bundle(),
         "rust-analyzer" => cmd_rust_analyzer(),
+        "typescript" => cmd_typescript(),
         "-h" | "--help" | "help" => {
             print!("{USAGE}");
             Ok(())
@@ -68,6 +70,11 @@ fn cmd_build() -> Result<(), String> {
         run_script(&root, "scripts/fetch-rust-analyzer.sh", &[])?;
     }
 
+    if !typescript_present(&root) {
+        step("typescript-language-server not found, installing");
+        run_script(&root, "scripts/fetch-typescript-language-server.sh", &[])?;
+    }
+
     step("building henka (release)");
     cargo_build(&root)
 }
@@ -82,6 +89,12 @@ fn cmd_jdtls() -> Result<(), String> {
 fn cmd_rust_analyzer() -> Result<(), String> {
     let root = workspace_root();
     run_script(&root, "scripts/fetch-rust-analyzer.sh", &[])
+}
+
+/// Install (or refresh) the typescript-language-server.
+fn cmd_typescript() -> Result<(), String> {
+    let root = workspace_root();
+    run_script(&root, "scripts/fetch-typescript-language-server.sh", &[])
 }
 
 /// Recompile the delegate-command bundle against the local jdtls.
@@ -106,6 +119,13 @@ fn bundle_present(root: &Path) -> bool {
 /// Whether the rust-analyzer binary has been fetched into the default location.
 fn rust_analyzer_present(root: &Path) -> bool {
     root.join(".cache/rust-analyzer/rust-analyzer").is_file()
+}
+
+/// Whether the typescript-language-server has been installed into the default
+/// location.
+fn typescript_present(root: &Path) -> bool {
+    root.join(".cache/typescript-language-server/node_modules/.bin/typescript-language-server")
+        .is_file()
 }
 
 /// Build the release binary, honoring cargo's `$CARGO` so the same toolchain
