@@ -538,6 +538,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "henka-lang-ts"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "henka-core",
+ "henka-lsp",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "henka-lsp"
 version = "0.0.0"
 dependencies = [
@@ -560,6 +575,7 @@ dependencies = [
  "henka-core",
  "henka-lang-java",
  "henka-lang-rust",
+ "henka-lang-ts",
  "rmcp",
  "schemars",
  "serde",

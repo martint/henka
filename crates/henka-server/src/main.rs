@@ -124,6 +124,15 @@ fn build_providers() -> ProviderRegistry {
             tracing::warn!(error = %e, "Rust provider unavailable; Rust operations disabled");
         }
     }
+    match henka_lang_ts::TsProvider::new() {
+        Ok(ts) => {
+            tracing::info!("TypeScript/JavaScript provider ready (typescript-language-server located)");
+            providers.register_for(henka_lang_ts::LANGUAGES, std::sync::Arc::new(ts));
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "TypeScript/JavaScript provider unavailable; TS/JS operations disabled");
+        }
+    }
     providers
 }
 

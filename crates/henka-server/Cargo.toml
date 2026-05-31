@@ -13,6 +13,7 @@ path = "src/main.rs"
 henka-core = { workspace = true }
 henka-lang-java = { workspace = true }
 henka-lang-rust = { workspace = true }
+henka-lang-ts = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }
 axum = { workspace = true }

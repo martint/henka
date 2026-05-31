@@ -13,6 +13,7 @@ henka-core = { path = "crates/henka-core" }
 henka-lsp = { path = "crates/henka-lsp" }
 henka-lang-java = { path = "crates/henka-lang-java" }
 henka-lang-rust = { path = "crates/henka-lang-rust" }
+henka-lang-ts = { path = "crates/henka-lang-ts" }
 
 # External
 anyhow = "1"
