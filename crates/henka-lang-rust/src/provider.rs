@@ -16,7 +16,7 @@ use tokio::sync::Mutex;
 
 use crate::analyzer::{RaSession, locate};
 use crate::error::RustError;
-use crate::operations::{FindUsagesOp, RenameOp};
+use crate::operations::{CodeActionOp, FindUsagesOp, RenameOp};
 
 #[async_trait]
 impl LanguageSession for RaSession {
@@ -91,7 +91,9 @@ impl LanguageProvider for RustProvider {
     }
 
     fn operations(&self) -> Vec<Arc<dyn Operation>> {
-        vec![Arc::new(RenameOp), Arc::new(FindUsagesOp)]
+        let mut ops: Vec<Arc<dyn Operation>> = vec![Arc::new(RenameOp), Arc::new(FindUsagesOp)];
+        ops.extend(CodeActionOp::rust_set());
+        ops
     }
 
     async fn session(&self, project: &Project) -> CoreResult<Arc<dyn LanguageSession>> {

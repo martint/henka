@@ -51,7 +51,7 @@ When a project spans several working copies, a call may also name a `workspace` 
 
 ## Using it with agents (MCP)
 
-Henka exposes a handful of tenancy tools — `register_project`, `unregister_project`, `list_projects`, `project_status`, `list_operations` — plus one tool per operation, routed to the backend for the target file's language. Java offers `rename`, `find-usages`, `change-signature`, `extract-variable`, `extract-constant`, `extract-field`, `extract-method`, `inline`, and `organize-imports`; Rust offers `rename` and `find-usages` so far.
+Henka exposes a handful of tenancy tools — `register_project`, `unregister_project`, `list_projects`, `project_status`, `list_operations` — plus one tool per operation, routed to the backend for the target file's language. Java offers `rename`, `find-usages`, `change-signature`, `extract-variable`, `extract-constant`, `extract-field`, `extract-method`, `inline`, and `organize-imports`; Rust offers `rename`, `find-usages`, `extract-variable`, `extract-constant`, `extract-function`, and `inline`.
 
 Wire it into [Claude Code](https://claude.com/claude-code) over **stdio** (no network, no auth surface):
 
