@@ -183,15 +183,21 @@ async fn handle_incoming(
         return;
     }
 
-    // Server-to-client request: reply with a default.
+    // Server-to-client request: reply with a default, and broadcast it so
+    // callers can observe requests like `workspace/applyEdit` (the only way some
+    // servers return a refactoring's edit).
     if let (Some(method), Some(id)) = (
         msg.get("method").and_then(Value::as_str),
         msg.get("id").cloned(),
     ) {
+        let params = msg.get("params").cloned().unwrap_or(Value::Null);
         let result = default_server_response(method, msg.get("params"));
         let reply = json!({ "jsonrpc": "2.0", "id": id, "result": result });
-        let mut stdin = stdin.lock().await;
-        let _ = write_message(&mut *stdin, &reply).await;
+        {
+            let mut stdin = stdin.lock().await;
+            let _ = write_message(&mut *stdin, &reply).await;
+        }
+        let _ = notifications.send((method.to_string(), params));
         return;
     }
 
