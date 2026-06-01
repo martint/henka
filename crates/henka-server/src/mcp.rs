@@ -12,7 +12,8 @@ use std::sync::Arc;
 use henka_core::operation::{OperationCtx, OperationOutcome, OperationRequest};
 use henka_core::{
     EditApplier, Error as CoreError, FileOperation, Language, OperationRegistry, Project,
-    ProjectRegistry, ProviderRegistry, Target, WorkspaceEdit, repo_identity, working_copy_delta,
+    ProjectRegistry, ProviderRegistry, Target, WorkspaceEdit, detect_revision, repo_identity,
+    working_copy_delta,
 };
 use rmcp::model::{
     Annotated, CallToolRequestParams, CallToolResult, Content, Implementation,
@@ -90,6 +91,54 @@ struct ListOperationsParams {
 struct NoParams {}
 
 // ---------------------------------------------------------------------------
+// Project status
+// ---------------------------------------------------------------------------
+
+/// A project plus the version-control state Henka currently reads it at.
+///
+/// The VCS fields let a caller detect that Henka's checkout has drifted from the
+/// working copy they are editing — e.g. "Henka is on `trunk`, I'm on my feature
+/// branch" — before trusting position-targeted coordinates against it.
+#[derive(Debug, serde::Serialize)]
+struct ProjectStatus<'a> {
+    #[serde(flatten)]
+    project: &'a Project,
+    /// The VCS state of the project root, or `null` when it is not a jj/git
+    /// working copy.
+    vcs: Option<VcsStatus>,
+}
+
+/// The version-control state of a project root.
+#[derive(Debug, serde::Serialize)]
+struct VcsStatus {
+    /// Which VCS reported the state (`jj` or `git`).
+    vcs: String,
+    /// The current revision: a jj change id or a git short commit hash.
+    revision: String,
+    /// The branch/bookmark name, if the revision carries one.
+    branch: Option<String>,
+    /// The shared repository root (its git common dir or jj repo dir). Sibling
+    /// working copies of the same repo report the same value.
+    repo_root: Option<PathBuf>,
+    /// Whether the working copy has uncommitted changes against its base.
+    dirty: bool,
+}
+
+/// Gather the project plus the VCS state of its root. Detecting the revision is
+/// read-only; the dirty check snapshots the working copy (jj's normal
+/// behavior), matching how operations already read the tree.
+fn project_status(project: &Project) -> ProjectStatus<'_> {
+    let vcs = detect_revision(&project.root).map(|rev| VcsStatus {
+        vcs: rev.vcs.to_string(),
+        revision: rev.id,
+        branch: rev.branch,
+        repo_root: repo_identity(&project.root).map(|id| id.path),
+        dirty: !working_copy_delta(&project.root).is_empty(),
+    });
+    ProjectStatus { project, vcs }
+}
+
+// ---------------------------------------------------------------------------
 // Tool catalog
 // ---------------------------------------------------------------------------
 
@@ -116,7 +165,10 @@ impl HenkaMcp {
             ),
             Tool::new(
                 "project_status",
-                "Report a registered project's root and detected languages.",
+                "Report a registered project's root, detected languages, and the version-control \
+                 state Henka reads it at (revision, branch, repo root, dirty). Use the VCS state to \
+                 confirm Henka's checkout matches the working copy you are editing before trusting \
+                 position-targeted coordinates.",
                 schema::<ProjectIdParams>(),
             ),
             Tool::new(
@@ -166,7 +218,7 @@ impl HenkaMcp {
                 let p: ProjectIdParams = parse_args(request.arguments)?;
                 let reg = self.registry.read().await;
                 let project = reg.get(&p.id).map_err(into_mcp)?;
-                ok_json(project)
+                ok_json(&project_status(project))
             }
             "list_operations" => {
                 let p: ListOperationsParams = parse_args(request.arguments)?;
@@ -770,6 +822,49 @@ mod tests {
             .unwrap();
         assert_ne!(applied.is_error, Some(true));
         assert_eq!(std::fs::read_to_string(&main).unwrap(), "Xhello\n");
+    }
+
+    #[tokio::test]
+    async fn project_status_reports_vcs_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mcp, root) = handler_with_project(dir.path());
+
+        // Make the project root a git working copy with one commit.
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        if !git(&["init", "-q"]) {
+            return; // git unavailable
+        }
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+
+        let res = mcp
+            .handle_call(call("project_status", args(json!({ "id": "p" }))))
+            .await
+            .unwrap();
+        let text = match &res.content[0].raw {
+            rmcp::model::RawContent::Text(t) => t.text.clone(),
+            _ => panic!("expected text content"),
+        };
+        let value: Value = serde_json::from_str(&text).unwrap();
+        let vcs = value.get("vcs").expect("vcs field present");
+        assert_eq!(vcs.get("vcs").and_then(Value::as_str), Some("git"));
+        assert!(
+            vcs.get("revision").and_then(Value::as_str).is_some(),
+            "revision reported: {value}"
+        );
+        // A fresh commit with no further edits is clean.
+        assert_eq!(vcs.get("dirty").and_then(Value::as_bool), Some(false));
+        // The base project fields are still present (flattened).
+        assert_eq!(value.get("id").and_then(Value::as_str), Some("p"));
     }
 
     #[tokio::test]
