@@ -33,6 +33,12 @@ services:
       # space-separated. Default allows localhost / 127.0.0.1 / ::1 only; add the
       # name your client reaches the server as, e.g. host.docker.internal.
       HENKA_MCP_ALLOWED_HOST: ${HENKA_MCP_ALLOWED_HOST:-}
+      # Henka rewrites caller-supplied paths by host=container prefix so an agent
+      # can register and target projects by the host paths it knows. The mount
+      # convention lives here, not in the binary: map the host workspaces dir onto
+      # its /workspaces mount. Append more mounts in HENKA_PATH_MAP (comma-
+      # separated host=container pairs); a trailing empty entry is ignored.
+      HENKA_PATH_MAP: ${HENKA_WORKSPACES_DIR}=/workspaces,${HENKA_PATH_MAP:-}
 
 volumes:
   henka-data:

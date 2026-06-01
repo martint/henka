@@ -30,6 +30,7 @@ use serde_json::{Map, Value, json};
 use tokio::sync::RwLock;
 
 use crate::ops;
+use crate::pathmap::PathMap;
 
 /// The skill resource: a written refactoring workflow, served over MCP and
 /// embedded at build time so the server stays a single self-contained binary.
@@ -45,18 +46,27 @@ pub struct HenkaMcp {
     registry: Arc<RwLock<ProjectRegistry>>,
     providers: Arc<ProviderRegistry>,
     operations: Arc<OperationRegistry>,
+    /// Rewrites caller-supplied paths to the paths Henka sees (e.g. a host
+    /// prefix mounted under a different path in a container).
+    path_map: Arc<PathMap>,
 }
 
 impl HenkaMcp {
     /// Build a handler over the given project registry and language providers.
-    /// The operation catalog is assembled from the providers' contributions.
+    /// The operation catalog is assembled from the providers' contributions;
+    /// the path map is taken from `HENKA_PATH_MAP`.
     pub fn new(registry: ProjectRegistry, providers: ProviderRegistry) -> Self {
         let mut operations = OperationRegistry::new();
         operations.extend(providers.operations());
+        let path_map = PathMap::from_env();
+        if !path_map.is_empty() {
+            tracing::info!("translating caller paths via HENKA_PATH_MAP");
+        }
         Self {
             registry: Arc::new(RwLock::new(registry)),
             providers: Arc::new(providers),
             operations: Arc::new(operations),
+            path_map: Arc::new(path_map),
         }
     }
 }
@@ -194,9 +204,10 @@ impl HenkaMcp {
         match request.name.as_ref() {
             "register_project" => {
                 let p: RegisterProjectParams = parse_args(request.arguments)?;
+                let root = self.path_map.map(Path::new(&p.root));
                 let project = {
                     let mut reg = self.registry.write().await;
-                    reg.register(p.id, p.root).map_err(into_mcp)?
+                    reg.register(p.id, root).map_err(into_mcp)?
                 };
                 ok_json(&project)
             }
@@ -257,7 +268,8 @@ impl HenkaMcp {
             })?;
         let descriptor = operation.descriptor();
 
-        let target = ops::parse_target(&args, descriptor.target)?;
+        let mut target = ops::parse_target(&args, descriptor.target)?;
+        remap_target_file(&self.path_map, &mut target);
         let params = ops::operation_params(&args);
 
         // Route to the provider for the target file's language when a project
@@ -284,7 +296,7 @@ impl HenkaMcp {
         })?;
 
         // Resolve and validate the working copy the edits should land in.
-        let workspace = resolve_workspace(&args, &target, &project);
+        let workspace = resolve_workspace(&args, &target, &project, &self.path_map);
         ensure_same_repo(&workspace, &project.root)?;
 
         // If the caller supplied an `expect` guard, verify the coordinate
@@ -345,10 +357,15 @@ impl HenkaMcp {
 
 /// Resolve the working copy a request's edits should be applied to: an explicit
 /// `workspace`, else the working copy containing an absolute target `file`, else
-/// the project root.
-fn resolve_workspace(args: &JsonObject, target: &Target, project: &Project) -> PathBuf {
+/// the project root. Caller-supplied paths are translated through `map`.
+fn resolve_workspace(
+    args: &JsonObject,
+    target: &Target,
+    project: &Project,
+    map: &PathMap,
+) -> PathBuf {
     if let Some(ws) = ops::workspace(args) {
-        return ws;
+        return map.map(&ws);
     }
     if let Some(file) = target.file()
         && file.is_absolute()
@@ -357,6 +374,21 @@ fn resolve_workspace(args: &JsonObject, target: &Target, project: &Project) -> P
         return root;
     }
     project.root.clone()
+}
+
+/// Translate an absolute target `file` through the path map, so a caller can
+/// name a file by a path Henka does not share verbatim. Relative paths resolve
+/// against the project root and are left alone.
+fn remap_target_file(map: &PathMap, target: &mut Target) {
+    let file = match target {
+        Target::Position { file, .. }
+        | Target::Selection { file, .. }
+        | Target::File { file } => file,
+        Target::Project => return,
+    };
+    if file.is_absolute() {
+        *file = map.map(file);
+    }
 }
 
 /// The nearest ancestor directory of `file` that is a working-copy root (one
@@ -1011,6 +1043,36 @@ mod tests {
         assert_eq!(vcs.get("dirty").and_then(Value::as_bool), Some(false));
         // The base project fields are still present (flattened).
         assert_eq!(value.get("id").and_then(Value::as_str), Some("p"));
+    }
+
+    #[tokio::test]
+    async fn register_project_translates_host_path() {
+        // A caller speaks a host path; the path map rewrites its prefix onto a
+        // location Henka can actually see, and registration succeeds there.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut mcp, _) = handler_with_project(dir.path());
+
+        let container = dir.path().join("container");
+        let proj = container.join("svc");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("pom.xml"), "<project/>").unwrap();
+
+        mcp.path_map = Arc::new(PathMap::parse(&format!(
+            "/virtual/host={}",
+            container.display()
+        )));
+
+        let res = mcp
+            .handle_call(call(
+                "register_project",
+                args(json!({ "root": "/virtual/host/svc", "id": "svc" })),
+            ))
+            .await
+            .unwrap();
+        assert_ne!(res.is_error, Some(true));
+
+        let reg = mcp.registry.read().await;
+        assert_eq!(reg.get("svc").unwrap().root, proj.canonicalize().unwrap());
     }
 
     #[tokio::test]

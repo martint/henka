@@ -2,6 +2,7 @@
 
 mod mcp;
 mod ops;
+mod pathmap;
 
 use std::path::PathBuf;
 

@@ -25,6 +25,16 @@ sibling directories under `/workspaces`, and Henka groups them by repository so
 they share one index — the `workspace` argument on an operation then selects
 which working copy an edit lands in.
 
+A client running outside the container speaks host paths, which do not exist at
+that spelling inside it. Henka bridges this with `HENKA_PATH_MAP`: `host=container`
+prefix rewrites it applies to caller-supplied paths (a project root, a
+`workspace`, an absolute `file`), so the client can register and target projects
+by the paths it knows. The binary knows nothing of the mount layout — the compose
+file owns that convention and derives the variable from `HENKA_WORKSPACES_DIR` and
+the `/workspaces` mount, appending any extra rewrites you set in `HENKA_PATH_MAP`.
+Running the image directly, set it yourself, e.g.
+`-e HENKA_PATH_MAP=/home/me/src=/workspaces`.
+
 Configuration knobs (environment variables, all optional):
 
 | Variable | Default | Purpose |
@@ -32,7 +42,8 @@ Configuration knobs (environment variables, all optional):
 | `HENKA_IMAGE` | `ghcr.io/martint/henka:latest` | Image to run. |
 | `HENKA_PUBLISH_ADDR` | `127.0.0.1` | Host interface Docker publishes the port on (the container always binds `0.0.0.0`). |
 | `HENKA_PUBLISH_PORT` | `8181` | Host port. |
-| `HENKA_WORKSPACES_DIR` | _(required)_ | Host directory of working copies, mounted read-write at `/workspaces`. |
+| `HENKA_WORKSPACES_DIR` | _(required)_ | Host directory of working copies, mounted read-write at `/workspaces`. The compose file also uses it to build the path-translation map. |
+| `HENKA_PATH_MAP` | _(none)_ | Extra `host=container` prefix rewrites (comma-separated) for additional mounts, appended to the `HENKA_WORKSPACES_DIR`→`/workspaces` rewrite the compose file derives. |
 | `HENKA_DATA_DIR` | `henka-data` (named volume) | Where the registry and indexes persist. |
 | `HENKA_LOG` | `info` | Log filter (`tracing` env-filter syntax). |
 

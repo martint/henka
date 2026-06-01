@@ -51,6 +51,8 @@ cp .env.example .env          # then set HENKA_WORKSPACES_DIR
 docker compose up -d          # serves MCP at http://127.0.0.1:8181/mcp
 ```
 
+The container sees its working copies under `/workspaces`, not at their host paths, so a client that speaks host paths would otherwise have to register projects by their in-container path. It doesn't need to: Henka rewrites caller-supplied paths (a project root, a `workspace`, an absolute `file`) by `host=container` prefix, and the compose file wires that up from your `HENKA_WORKSPACES_DIR` and the `/workspaces` mount automatically. For more mounts, append extra `host=container` rewrites in `HENKA_PATH_MAP`.
+
 See [`docs/deploying.md`](docs/deploying.md) for configuration, the GHCR image, and security notes.
 
 ## How a refactoring works
