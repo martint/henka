@@ -205,11 +205,17 @@ impl HenkaMcp {
             "register_project" => {
                 let p: RegisterProjectParams = parse_args(request.arguments)?;
                 let root = self.path_map.map(Path::new(&p.root));
-                let project = {
-                    let mut reg = self.registry.write().await;
-                    reg.register(p.id, root).map_err(into_mcp)?
-                };
-                ok_json(&project)
+                let mut reg = self.registry.write().await;
+                match reg.register(p.id, root) {
+                    Ok(project) => ok_json(&project),
+                    // A missing path usually means the caller named a path Henka
+                    // cannot see (its own filesystem differs, e.g. a container
+                    // mount). Help them find the path Henka does see.
+                    Err(CoreError::PathNotFound(missing)) => {
+                        Err(path_not_found_error(&missing, &suggest_mounts(&missing, &reg)))
+                    }
+                    Err(e) => Err(into_mcp(e)),
+                }
             }
             "unregister_project" => {
                 let p: ProjectIdParams = parse_args(request.arguments)?;
@@ -374,6 +380,61 @@ fn resolve_workspace(
         return root;
     }
     project.root.clone()
+}
+
+/// Build the error for a `register_project` whose root does not exist inside
+/// Henka, explaining the container/filesystem boundary and offering any mounted
+/// working copies whose name matches.
+fn path_not_found_error(missing: &Path, suggestions: &[PathBuf]) -> McpError {
+    let mut msg = format!(
+        "path does not exist inside Henka: `{}`. Henka resolves paths on its own filesystem, not \
+         the caller's — when it runs in a container, host paths must be mounted (by convention \
+         under /workspaces) and registered by their in-container path.",
+        missing.display()
+    );
+    if !suggestions.is_empty() {
+        let list = suggestions
+            .iter()
+            .map(|p| format!("`{}`", p.display()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        msg.push_str(&format!(" A mounted working copy of the same name exists at: {list}."));
+    }
+    msg.push_str(
+        " To keep registering by caller-side paths, set HENKA_PATH_MAP=<host-prefix>=<container-prefix>.",
+    );
+    McpError::invalid_params(msg, None)
+}
+
+/// Look for directories Henka can see whose name matches the missing path's,
+/// to suggest as the intended in-container target. Scans the conventional
+/// `/workspaces` mount and the parent of every already-registered project.
+fn suggest_mounts(missing: &Path, registry: &ProjectRegistry) -> Vec<PathBuf> {
+    let Some(name) = missing.file_name() else {
+        return Vec::new();
+    };
+
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let mount = Path::new("/workspaces");
+    if mount.is_dir() {
+        roots.push(mount.to_path_buf());
+    }
+    for project in registry.list() {
+        if let Some(parent) = project.root.parent() {
+            roots.push(parent.to_path_buf());
+        }
+    }
+    roots.sort();
+    roots.dedup();
+
+    let mut out: Vec<PathBuf> = roots
+        .into_iter()
+        .map(|root| root.join(name))
+        .filter(|candidate| candidate.is_dir() && candidate != missing)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Translate an absolute target `file` through the path map, so a caller can
@@ -1043,6 +1104,36 @@ mod tests {
         assert_eq!(vcs.get("dirty").and_then(Value::as_bool), Some(false));
         // The base project fields are still present (flattened).
         assert_eq!(value.get("id").and_then(Value::as_str), Some("p"));
+    }
+
+    #[tokio::test]
+    async fn register_project_suggests_matching_mount() {
+        // handler_with_project registers `p` at <tmp>/proj, so <tmp> is scanned.
+        let dir = tempfile::tempdir().unwrap();
+        let (mcp, _) = handler_with_project(dir.path());
+
+        // A sibling working copy Henka can see, with the wanted name.
+        let wanted = dir.path().join("wanted");
+        std::fs::create_dir_all(&wanted).unwrap();
+        std::fs::write(wanted.join("pom.xml"), "<project/>").unwrap();
+
+        // Register a non-existent path whose basename matches that sibling.
+        let err = mcp
+            .handle_call(call(
+                "register_project",
+                args(json!({ "root": "/no/such/place/wanted", "id": "w" })),
+            ))
+            .await
+            .unwrap_err();
+
+        assert!(err.message.contains("does not exist inside Henka"), "got: {}", err.message);
+        assert!(
+            err.message.contains(&wanted.display().to_string()),
+            "expected suggestion of {}, got: {}",
+            wanted.display(),
+            err.message
+        );
+        assert!(err.message.contains("HENKA_PATH_MAP"), "got: {}", err.message);
     }
 
     #[tokio::test]

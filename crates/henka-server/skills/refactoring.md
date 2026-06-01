@@ -19,6 +19,9 @@ happens to hit in comments and unrelated code.
 - Call `register_project` with the absolute `root` path of the source tree (optionally an `id`).
 - The server detects the languages present and returns the project's `id` and `languages`.
 - `list_projects` shows what is already registered; registration persists across restarts.
+- The server resolves paths on **its own** filesystem. If it runs in a container, your host path may
+  not exist there — register the in-container path instead. A failed registration says where the
+  server looked and suggests any mounted working copy of the same name.
 
 ## 2. Discover what you can do
 
