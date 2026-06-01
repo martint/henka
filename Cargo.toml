@@ -46,5 +46,5 @@ axum = "0.8"
 async-trait = "0.1"
 similar = { version = "3", features = ["text", "unicode"] }
 walkdir = "2"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 tempfile = "3"

@@ -47,8 +47,15 @@ struct Cli {
     /// the loopback defaults (localhost, 127.0.0.1, ::1). The HTTP transport
     /// rejects other hosts as a DNS-rebinding guard; add the host your client
     /// connects as — e.g. `--allowed-host host.docker.internal` for a client in
-    /// a container. A value without a port matches any port. Repeatable.
-    #[arg(long = "allowed-host", value_name = "HOST")]
+    /// a container. A value without a port matches any port. Repeatable, or set
+    /// `HENKA_MCP_ALLOWED_HOST` to a space-separated list (handy in a container,
+    /// where the command is the image default).
+    #[arg(
+        long = "allowed-host",
+        value_name = "HOST",
+        env = "HENKA_MCP_ALLOWED_HOST",
+        value_delimiter = ' '
+    )]
     allowed_hosts: Vec<String>,
 }
 
@@ -82,10 +89,17 @@ async fn serve_http(
     allowed_hosts: &[String],
 ) -> anyhow::Result<()> {
     // Keep rmcp's loopback-only DNS-rebinding guard, extended with any hosts the
-    // operator explicitly trusts.
+    // operator explicitly trusts. Ignore blanks (e.g. an unset
+    // HENKA_MCP_ALLOWED_HOST passed through as an empty string).
+    let extra: Vec<String> = allowed_hosts
+        .iter()
+        .map(|h| h.trim())
+        .filter(|h| !h.is_empty())
+        .map(str::to_string)
+        .collect();
     let mut config = StreamableHttpServerConfig::default();
-    config.allowed_hosts.extend(allowed_hosts.iter().cloned());
-    if !allowed_hosts.is_empty() {
+    config.allowed_hosts.extend(extra.iter().cloned());
+    if !extra.is_empty() {
         tracing::info!(allowed_hosts = ?config.allowed_hosts, "accepting additional Host headers");
     }
 
