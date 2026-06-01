@@ -37,7 +37,7 @@ Flags (each has effect only where noted):
 | `--config <path>` | Project registry file. Default `$XDG_CONFIG_HOME/henka/projects.toml`. |
 | `--allowed-host <host>` | Extra `Host` value accepted over HTTP, beyond the loopback defaults. Repeatable, or set `HENKA_MCP_ALLOWED_HOST` to a space-separated list. |
 
-Environment mirrors and discovery: `HENKA_CONFIG` (registry path), `JDTLS_HOME` / `HENKA_JDTLS_BUNDLE` (Java language server + bundle), `JAVA_HOME` (JVM to launch it with), `HENKA_LOG` (log filter; logs go to stderr).
+Environment mirrors and discovery: `HENKA_DATA` (single root for all persistent state — the registry and the per-repository indexes), `HENKA_CONFIG` (registry path, overrides `HENKA_DATA` for the registry alone), `JDTLS_HOME` / `HENKA_JDTLS_BUNDLE` (Java language server + bundle), `JAVA_HOME` (JVM to launch it with), `HENKA_LOG` (log filter; logs go to stderr).
 
 **The HTTP transport is unauthenticated.** Binding beyond loopback (e.g. `--bind 0.0.0.0:8181`) exposes every registered project to anyone who can reach the port — **wrong for anything shared**. Keep it on loopback, or front it with a reverse proxy that terminates auth.
 

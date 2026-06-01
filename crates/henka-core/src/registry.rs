@@ -127,12 +127,15 @@ impl ProjectRegistry {
     }
 }
 
-/// Resolve the default registry path: `$HENKA_CONFIG`, else
-/// `$XDG_CONFIG_HOME/henka/projects.toml`, else
+/// Resolve the default registry path, in order: `$HENKA_CONFIG`,
+/// `$HENKA_DATA/projects.toml`, `$XDG_CONFIG_HOME/henka/projects.toml`, else
 /// `$HOME/.config/henka/projects.toml`.
 pub fn default_config_path() -> PathBuf {
     if let Some(explicit) = std::env::var_os("HENKA_CONFIG") {
         return PathBuf::from(explicit);
+    }
+    if let Some(data) = data_root() {
+        return data.join("projects.toml");
     }
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -140,6 +143,16 @@ pub fn default_config_path() -> PathBuf {
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
         .unwrap_or_else(|| PathBuf::from(".config"));
     base.join("henka").join("projects.toml")
+}
+
+/// The single root for all of Henka's persistent state, if set via `$HENKA_DATA`.
+/// When set, both the project registry and the per-repository indexes live under
+/// it, so one host-mounted directory holds everything (e.g. `/data` in a
+/// container). `None` falls back to the per-purpose XDG locations.
+pub fn data_root() -> Option<PathBuf> {
+    std::env::var_os("HENKA_DATA")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
 }
 
 /// Normalize and validate a project root path.
@@ -237,6 +250,40 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("pom.xml"), "<project/>").unwrap();
         root
+    }
+
+    #[test]
+    fn data_root_places_registry_under_it() {
+        // HENKA_CONFIG wins over HENKA_DATA; HENKA_DATA roots the registry
+        // otherwise. Use a unique value and restore the env to stay isolated.
+        let prev_data = std::env::var_os("HENKA_DATA");
+        let prev_cfg = std::env::var_os("HENKA_CONFIG");
+        // SAFETY: single-threaded test; env restored before returning.
+        unsafe {
+            std::env::remove_var("HENKA_CONFIG");
+            std::env::set_var("HENKA_DATA", "/srv/henka-data");
+        }
+        assert_eq!(
+            default_config_path(),
+            PathBuf::from("/srv/henka-data/projects.toml")
+        );
+        assert_eq!(data_root(), Some(PathBuf::from("/srv/henka-data")));
+
+        unsafe {
+            std::env::set_var("HENKA_CONFIG", "/explicit/cfg.toml");
+        }
+        assert_eq!(default_config_path(), PathBuf::from("/explicit/cfg.toml"));
+
+        unsafe {
+            match prev_data {
+                Some(v) => std::env::set_var("HENKA_DATA", v),
+                None => std::env::remove_var("HENKA_DATA"),
+            }
+            match prev_cfg {
+                Some(v) => std::env::set_var("HENKA_CONFIG", v),
+                None => std::env::remove_var("HENKA_CONFIG"),
+            }
+        }
     }
 
     #[test]

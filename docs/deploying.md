@@ -36,8 +36,10 @@ Configuration knobs (environment variables, all optional):
 | `HENKA_DATA_DIR` | `henka-data` (named volume) | Where the registry and indexes persist. |
 | `HENKA_LOG` | `info` | Log filter (`tracing` env-filter syntax). |
 
-State lives in the `/data` volume: the project registry at
-`/data/projects.toml` and the warm per-repository indexes under `/data/cache`.
+All persistent state lives under `/data` (the image sets `HENKA_DATA=/data`):
+the project registry at `/data/projects.toml` and the warm per-repository
+indexes under `/data/workspaces`. Mounting `/data` to a host directory or volume
+is all it takes to persist everything across restarts.
 
 ## Running the image directly
 

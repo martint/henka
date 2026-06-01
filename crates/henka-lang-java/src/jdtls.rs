@@ -114,7 +114,9 @@ fn launcher_in(home: &Path) -> Option<PathBuf> {
     None
 }
 
-/// The base cache directory: `$XDG_CACHE_HOME`/`~/.cache` under `henka`.
+/// The base cache directory used to *discover* bundled distributions:
+/// `$XDG_CACHE_HOME`/`~/.cache` under `henka`. This is read-only state, distinct
+/// from where indexes are written (see [`index_base`]).
 pub fn cache_base() -> PathBuf {
     std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
@@ -122,6 +124,12 @@ pub fn cache_base() -> PathBuf {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .unwrap_or_else(|| PathBuf::from(".cache"))
         .join("henka")
+}
+
+/// The base directory for writable index state: `$HENKA_DATA` when set (so all
+/// persistent state lives under one host-mounted root), else [`cache_base`].
+pub fn index_base() -> PathBuf {
+    henka_core::data_root().unwrap_or_else(cache_base)
 }
 
 /// Locate the refactoring delegate-command bundle jar, if built.

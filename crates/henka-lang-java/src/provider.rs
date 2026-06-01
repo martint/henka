@@ -15,7 +15,7 @@ use henka_core::{Error as CoreError, Language, Project, Result as CoreResult, re
 use tokio::sync::Mutex;
 
 use crate::error::JavaError;
-use crate::jdtls::{JdtlsInstall, JdtlsSession, cache_base};
+use crate::jdtls::{JdtlsInstall, JdtlsSession, index_base};
 use crate::operations::{ChangeSignatureOp, CodeActionOp, FindUsagesOp, RenameOp};
 
 #[async_trait]
@@ -81,7 +81,7 @@ impl JavaProvider {
         let install = JdtlsInstall::locate()?;
         Ok(Self {
             install,
-            workspaces: cache_base().join("workspaces"),
+            workspaces: index_base().join("workspaces"),
             sessions: Mutex::new(HashMap::new()),
         })
     }

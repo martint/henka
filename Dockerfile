@@ -95,13 +95,13 @@ COPY --from=jdtls /build/jdtls-bundle/henka-jdtls-bundle.jar /opt/henka/henka-jd
 COPY --from=rust-analyzer /opt/henka/rust-analyzer /opt/henka/rust-analyzer
 COPY --from=typescript /opt/henka/typescript-language-server /opt/henka/typescript-language-server
 
-# Point Henka at the bundled servers, and keep config/cache under /data.
+# Point Henka at the bundled servers, and root all persistent state (the
+# project registry and the per-repository indexes) under /data.
 ENV JDTLS_HOME=/opt/henka/jdtls \
     HENKA_JDTLS_BUNDLE=/opt/henka/henka-jdtls-bundle.jar \
     HENKA_RUST_ANALYZER=/opt/henka/rust-analyzer/rust-analyzer \
     HENKA_TYPESCRIPT_LANGUAGE_SERVER=/opt/henka/typescript-language-server/node_modules/.bin/typescript-language-server \
-    HENKA_CONFIG=/data/projects.toml \
-    XDG_CACHE_HOME=/data/cache \
+    HENKA_DATA=/data \
     HENKA_LOG=info
 
 # Settle the data dir on a well-known path so a bare `docker run` works without
