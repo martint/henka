@@ -35,11 +35,23 @@ Flags (each has effect only where noted):
 | `--transport stdio\|http` | How clients connect. Default `stdio`. |
 | `--bind <addr>` | Address for `--transport http`. Default `127.0.0.1:8181`. |
 | `--config <path>` | Project registry file. Default `$XDG_CONFIG_HOME/henka/projects.toml`. |
-| `--allowed-host <host>` | Extra `Host` value accepted over HTTP, beyond the loopback defaults. Repeatable. |
+| `--allowed-host <host>` | Extra `Host` value accepted over HTTP, beyond the loopback defaults. Repeatable, or set `HENKA_MCP_ALLOWED_HOST` to a space-separated list. |
 
 Environment mirrors and discovery: `HENKA_CONFIG` (registry path), `JDTLS_HOME` / `HENKA_JDTLS_BUNDLE` (Java language server + bundle), `JAVA_HOME` (JVM to launch it with), `HENKA_LOG` (log filter; logs go to stderr).
 
 **The HTTP transport is unauthenticated.** Binding beyond loopback (e.g. `--bind 0.0.0.0:8181`) exposes every registered project to anyone who can reach the port — **wrong for anything shared**. Keep it on loopback, or front it with a reverse proxy that terminates auth.
+
+### With Docker
+
+A prebuilt image bundles Henka and the language servers it drives (no host toolchain needed). Copy the example compose and env files, point `HENKA_WORKSPACES_DIR` at a host directory of working copies (mounted at `/workspaces`), and register each as a project by its in-container path:
+
+```sh
+cp docker-compose.yml.example docker-compose.yml
+cp .env.example .env          # then set HENKA_WORKSPACES_DIR
+docker compose up -d          # serves MCP at http://127.0.0.1:8181/mcp
+```
+
+See [`docs/deploying.md`](docs/deploying.md) for configuration, the GHCR image, and security notes.
 
 ## How a refactoring works
 

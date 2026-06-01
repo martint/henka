@@ -2,3 +2,11 @@
 /.cache
 /jdtls-bundle/build
 /jdtls-bundle/henka-jdtls-bundle.jar
+
+# Local container config, copied from the .example files and edited.
+/docker-compose.yml
+/.env
+
+# Editor swap/backup files.
+*.swp
+*~

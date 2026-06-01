@@ -1,0 +1,38 @@
+# Run Henka in a container, serving MCP over streamable HTTP at /mcp.
+#
+# Mount your working copies under /workspaces (read-write — Henka applies edits
+# in place) and register each as a project by its in-container path. A project's
+# git worktrees / jj workspaces can sit as sibling directories here; Henka groups
+# them by repository and shares one index. State (the project registry and the
+# warm per-repository indexes) persists in /data.
+services:
+  henka:
+    image: ${HENKA_IMAGE:-ghcr.io/martint/henka:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # HENKA_PUBLISH_ADDR is the host interface Docker publishes the port on
+    # (the container itself always binds 0.0.0.0). It defaults to loopback so
+    # the unauthenticated server is not exposed on the host network; set it to
+    # 0.0.0.0 only behind a proxy that terminates auth, or on a trusted network.
+    ports:
+      - "${HENKA_PUBLISH_ADDR:-127.0.0.1}:${HENKA_PUBLISH_PORT:-8181}:8181"
+    volumes:
+      # Bare token = the named volume below; a path = bind mount.
+      # Unset → managed `henka-data` volume (production default). Set
+      # HENKA_DATA_DIR=${HOME}/henka to keep state on the host filesystem.
+      - "${HENKA_DATA_DIR:-henka-data}:/data"
+      - "${HENKA_WORKSPACES_DIR:?set HENKA_WORKSPACES_DIR to a host dir of working copies}:/workspaces:rw"
+    # The image already runs `--transport http --bind 0.0.0.0:8181` by default.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      HENKA_LOG: ${HENKA_LOG:-info}
+      # Hosts to add to the MCP Host-header allowlist (DNS-rebinding guard),
+      # space-separated. Default allows localhost / 127.0.0.1 / ::1 only; add the
+      # name your client reaches the server as, e.g. host.docker.internal.
+      HENKA_MCP_ALLOWED_HOST: ${HENKA_MCP_ALLOWED_HOST:-}
+
+volumes:
+  henka-data:

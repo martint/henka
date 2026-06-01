@@ -1,0 +1,22 @@
+# Build outputs — the image rebuilds these from sources.
+target/
+.cache/
+jdtls-bundle/build/
+jdtls-bundle/henka-jdtls-bundle.jar
+
+# Local dev / editor / VCS state that doesn't belong in the build context.
+.git/
+.jj/
+.vscode/
+.idea/
+.claude/
+
+# Container files themselves — not needed inside the build context.
+Dockerfile*
+.dockerignore
+docker-compose*.yml
+
+# Misc local files.
+*.log
+.env
+.env.*
