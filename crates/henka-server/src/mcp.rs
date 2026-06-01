@@ -287,6 +287,11 @@ impl HenkaMcp {
         let workspace = resolve_workspace(&args, &target, &project);
         ensure_same_repo(&workspace, &project.root)?;
 
+        // If the caller supplied an `expect` guard, verify the coordinate
+        // resolves to the intended symbol in Henka's own copy before acting,
+        // turning a silent mis-target into an actionable error.
+        validate_expectation(&args, &target, &workspace)?;
+
         let session = provider.session(&project).await.map_err(into_mcp)?;
         // Serialize the request and overlay the working copy's content onto the
         // shared index, so the operation sees that working copy. The guard and
@@ -387,6 +392,108 @@ fn ensure_same_repo(workspace: &Path, project_root: &Path) -> Result<(), McpErro
 /// Canonicalize a path, falling back to the path itself when it can't be.
 fn canonical(p: &Path) -> PathBuf {
     p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Enforce the optional `expect` guard: that the identifier (for a position) or
+/// the selected text (for a selection) Henka reads at the target in `workspace`
+/// matches what the caller said it should be.
+///
+/// This is the guard against coordinate/revision drift: a coordinate computed
+/// against a different checkout can land on a neighboring token in Henka's copy
+/// and otherwise produce a confident, wrong result. With no `expect`, behavior
+/// is unchanged.
+fn validate_expectation(
+    args: &JsonObject,
+    target: &Target,
+    workspace: &Path,
+) -> Result<(), McpError> {
+    let Some(expected) = ops::expect(args) else {
+        return Ok(());
+    };
+    // UTF-16 coordinates, matching the schema and the LSP backends.
+    let enc = henka_core::PositionEncoding::Utf16;
+    let (file, found, what) = match target {
+        Target::Position { file, position } => {
+            let content = read_for_validation(workspace, file)?;
+            (
+                file,
+                henka_core::identifier_at(&content, *position, enc),
+                "identifier",
+            )
+        }
+        Target::Selection { file, range } => {
+            let content = read_for_validation(workspace, file)?;
+            (
+                file,
+                henka_core::text_in_range(&content, *range, enc),
+                "selection",
+            )
+        }
+        // Whole-file and project targets carry no coordinate to validate.
+        Target::File { .. } | Target::Project => return Ok(()),
+    };
+
+    if found.as_deref() == Some(expected.as_str()) {
+        return Ok(());
+    }
+
+    let saw = match &found {
+        Some(text) => format!("`{text}`"),
+        None => format!("no {what}"),
+    };
+    let at = position_label(target);
+    let here = match detect_revision(workspace) {
+        Some(rev) => {
+            let branch = rev.branch.map(|b| format!(", {b}")).unwrap_or_default();
+            format!(" ({} {}{branch})", rev.vcs, rev.id)
+        }
+        None => String::new(),
+    };
+    Err(McpError::invalid_params(
+        format!(
+            "target validation failed: expected {what} `{expected}` at {}{at}, but Henka's copy \
+             has {saw} there. Henka is reading `{}`{here}. The coordinate may have been computed \
+             against a different revision or checkout — call project_status to compare, or pass \
+             the matching `workspace`.",
+            file.display(),
+            workspace.display(),
+        ),
+        None,
+    ))
+}
+
+/// Read the target file as Henka sees it in `workspace`, for validation. A
+/// missing file is itself surfaced (it usually means the path doesn't resolve
+/// the way the caller expects).
+fn read_for_validation(workspace: &Path, file: &Path) -> Result<String, McpError> {
+    let abs = if file.is_absolute() {
+        file.to_path_buf()
+    } else {
+        workspace.join(file)
+    };
+    std::fs::read_to_string(&abs).map_err(|e| {
+        McpError::invalid_params(
+            format!(
+                "cannot read `{}` to validate the target: {e}",
+                abs.display()
+            ),
+            None,
+        )
+    })
+}
+
+/// A `:line:character` suffix for a position/selection target, for error text.
+fn position_label(target: &Target) -> String {
+    match target {
+        Target::Position { position, .. } => {
+            format!(":{}:{}", position.line, position.character)
+        }
+        Target::Selection { range, .. } => format!(
+            ":{}:{}-{}:{}",
+            range.start.line, range.start.character, range.end.line, range.end.character
+        ),
+        _ => String::new(),
+    }
 }
 
 /// Reject an edit that, after retargeting, would write to an absolute path
@@ -822,6 +929,45 @@ mod tests {
             .unwrap();
         assert_ne!(applied.is_error, Some(true));
         assert_eq!(std::fs::read_to_string(&main).unwrap(), "Xhello\n");
+    }
+
+    #[tokio::test]
+    async fn expect_guard_blocks_mismatched_coordinate() {
+        // Main.java is "hello\n"; the identifier at 0:0 is `hello`.
+        let dir = tempfile::tempdir().unwrap();
+        let (mcp, _) = handler_with_project(dir.path());
+
+        // A matching expectation passes through to the operation.
+        let ok = mcp
+            .handle_call(call(
+                "insert-text",
+                args(json!({
+                    "project": "p", "file": "Main.java", "line": 0, "character": 0,
+                    "expect": "hello", "text": "X"
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_ne!(ok.is_error, Some(true));
+
+        // A wrong expectation fails loudly, naming what Henka actually saw.
+        let err = mcp
+            .handle_call(call(
+                "insert-text",
+                args(json!({
+                    "project": "p", "file": "Main.java", "line": 0, "character": 0,
+                    "expect": "goodbye", "text": "X"
+                })),
+            ))
+            .await
+            .unwrap_err();
+        assert!(
+            err.message.contains("target validation failed")
+                && err.message.contains("`goodbye`")
+                && err.message.contains("`hello`"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[tokio::test]

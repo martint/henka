@@ -30,6 +30,7 @@ const ENVELOPE_KEYS: &[&str] = &[
     "start_character",
     "end_line",
     "end_character",
+    "expect",
     "dry_run",
 ];
 
@@ -78,6 +79,13 @@ fn build_input_schema(descriptor: &OperationDescriptor) -> Arc<JsonObject> {
             props.insert("file".into(), file_prop);
             props.insert("line".into(), line_prop("target"));
             props.insert("character".into(), char_prop("target"));
+            props.insert("expect".into(), json!({
+                "type": "string",
+                "description": "Optional guard: the identifier you expect at this position. \
+                                Henka checks its own copy of the file matches and errors instead \
+                                of acting on a mis-resolved coordinate (e.g. one computed against \
+                                a different revision)."
+            }));
             required.extend(["file".into(), "line".into(), "character".into()]);
         }
         TargetKind::Selection => {
@@ -86,6 +94,12 @@ fn build_input_schema(descriptor: &OperationDescriptor) -> Arc<JsonObject> {
             props.insert("start_character".into(), char_prop("selection start"));
             props.insert("end_line".into(), line_prop("selection end"));
             props.insert("end_character".into(), char_prop("selection end"));
+            props.insert("expect".into(), json!({
+                "type": "string",
+                "description": "Optional guard: the exact text you expect the selection to cover. \
+                                Henka checks its own copy of the file matches and errors instead \
+                                of acting on a mis-resolved range."
+            }));
             required.extend([
                 "file".into(),
                 "start_line".into(),
@@ -149,6 +163,14 @@ pub fn workspace(args: &JsonObject) -> Option<PathBuf> {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
+}
+
+/// The caller's expected identifier/selection text at the target, if given.
+pub fn expect(args: &JsonObject) -> Option<String> {
+    args.get("expect")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// Whether the call requested a preview (defaults to true for edits).

@@ -344,6 +344,47 @@ fn encoded_len(ch: char, encoding: PositionEncoding) -> u32 {
     }
 }
 
+/// Whether `ch` can appear in a source identifier (letters, digits, `_`, `$`).
+fn is_identifier_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_' || ch == '$'
+}
+
+/// The identifier `text` contains at `pos`, or `None` if `pos` does not touch
+/// one (it lands in whitespace, punctuation, or out of range).
+///
+/// A position anywhere within an identifier — including just past its last
+/// character, as LSP permits — resolves to the whole identifier. This is used to
+/// validate that a caller-supplied coordinate refers to the symbol it intended,
+/// catching coordinates computed against a different revision of the file.
+pub fn identifier_at(text: &str, pos: Position, encoding: PositionEncoding) -> Option<String> {
+    let offset = resolve_offset(text, pos, encoding)?;
+    let mut start = offset;
+    for (i, ch) in text[..offset].char_indices().rev() {
+        if is_identifier_char(ch) {
+            start = i;
+        } else {
+            break;
+        }
+    }
+    let mut end = offset;
+    for ch in text[offset..].chars() {
+        if is_identifier_char(ch) {
+            end += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    (start != end).then(|| text[start..end].to_string())
+}
+
+/// The slice of `text` covered by `range`, or `None` if either endpoint is out
+/// of range or the range is inverted.
+pub fn text_in_range(text: &str, range: Range, encoding: PositionEncoding) -> Option<String> {
+    let start = resolve_offset(text, range.start, encoding)?;
+    let end = resolve_offset(text, range.end, encoding)?;
+    (start <= end).then(|| text[start..end].to_string())
+}
+
 /// Resolve an edit path against the project root.
 fn resolve_path(path: &Path, root: &Path) -> PathBuf {
     if path.is_absolute() {
@@ -409,6 +450,42 @@ mod tests {
 
     fn pos(line: u32, ch: u32) -> Position {
         Position::new(line, ch)
+    }
+
+    #[test]
+    fn identifier_at_resolves_whole_identifier() {
+        let text = "    boolean isCovariantTypeBase(Type typeBase) {\n";
+        let enc = PositionEncoding::Utf16;
+        // A coordinate landing inside the method name resolves to all of it,
+        // whether at its start, middle, or just past its end.
+        let name = "isCovariantTypeBase";
+        let start = 12; // column of `isCovariantTypeBase`
+        assert_eq!(identifier_at(text, pos(0, start), enc).as_deref(), Some(name));
+        assert_eq!(
+            identifier_at(text, pos(0, start + 5), enc).as_deref(),
+            Some(name)
+        );
+        assert_eq!(
+            identifier_at(text, pos(0, start + name.len() as u32), enc).as_deref(),
+            Some(name)
+        );
+        // A different column lands on the parameter, not the method.
+        assert_eq!(identifier_at(text, pos(0, 37), enc).as_deref(), Some("typeBase"));
+        // Whitespace and out-of-range lines touch no identifier.
+        assert_eq!(identifier_at(text, pos(0, 0), enc), None);
+        assert_eq!(identifier_at(text, pos(9, 0), enc), None);
+    }
+
+    #[test]
+    fn text_in_range_returns_selected_slice() {
+        let text = "let answer = 42;\n";
+        let enc = PositionEncoding::Utf16;
+        assert_eq!(
+            text_in_range(text, Range::new(pos(0, 4), pos(0, 10)), enc).as_deref(),
+            Some("answer")
+        );
+        // Inverted ranges are rejected.
+        assert_eq!(text_in_range(text, Range::new(pos(0, 10), pos(0, 4)), enc), None);
     }
 
     fn single_file_edit(root: &Path, name: &str, edits: Vec<TextEdit>) -> WorkspaceEdit {

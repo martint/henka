@@ -39,6 +39,13 @@ Operations are language-scoped and pluggable — do not assume a fixed menu.
 
 Paths are relative to the project root unless absolute.
 
+**Guard your coordinates.** A `line`/`character` you computed against your own copy of a file can
+land on a different token in the server's copy if its checkout is on another revision. On a
+position or selection target, pass `expect` — the identifier (or exact selected text) you expect
+there — and the server verifies its own copy matches before acting, failing loudly instead of
+silently mis-targeting. If a guard ever fails, `project_status` reports the revision and branch the
+server reads the project at, so you can tell whether its checkout has drifted from yours.
+
 ## 4. Running an operation
 
 - **Queries** return their structured result directly.
