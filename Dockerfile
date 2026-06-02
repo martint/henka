@@ -96,13 +96,23 @@ COPY --from=rust-analyzer /opt/henka/rust-analyzer /opt/henka/rust-analyzer
 COPY --from=typescript /opt/henka/typescript-language-server /opt/henka/typescript-language-server
 
 # Point Henka at the bundled servers, and root all persistent state (the
-# project registry and the per-repository indexes) under /data.
+# project registry and the per-repository indexes) under /data. HOME is a
+# writable dir so the language servers and JVM have somewhere for incidental
+# caches when the container runs as a non-root user.
 ENV JDTLS_HOME=/opt/henka/jdtls \
     HENKA_JDTLS_BUNDLE=/opt/henka/henka-jdtls-bundle.jar \
     HENKA_RUST_ANALYZER=/opt/henka/rust-analyzer/rust-analyzer \
     HENKA_TYPESCRIPT_LANGUAGE_SERVER=/opt/henka/typescript-language-server/node_modules/.bin/typescript-language-server \
     HENKA_DATA=/data \
-    HENKA_LOG=info
+    HENKA_LOG=info \
+    HOME=/home/henka
+
+# Run the container as the host user (compose `user:` / `docker run --user`) so
+# the files Henka writes — edits in the /workspaces bind mount, and its state
+# under /data — are owned by that user, not root. That means an arbitrary uid
+# must be able to write both the data dir (which seeds the named volume) and
+# HOME, so make them world-writable here; the container is single-tenant.
+RUN mkdir -p /data /home/henka && chmod 0777 /data /home/henka
 
 # Settle the data dir on a well-known path so a bare `docker run` works without
 # operator setup. Persist via `-v henka-data:/data`.

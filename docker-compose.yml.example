@@ -11,6 +11,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # Run as the host user so files Henka writes — edits to your repos under
+    # /workspaces, and its state under /data — are owned by you, not root. Set
+    # HENKA_UID/HENKA_GID in .env, or launch with
+    # `HENKA_UID=$(id -u) HENKA_GID=$(id -g) docker compose up`. Defaults to root.
+    user: "${HENKA_UID:-0}:${HENKA_GID:-0}"
     # HENKA_PUBLISH_ADDR is the host interface Docker publishes the port on
     # (the container itself always binds 0.0.0.0). It defaults to loopback so
     # the unauthenticated server is not exposed on the host network; set it to

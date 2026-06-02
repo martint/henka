@@ -44,6 +44,7 @@ Configuration knobs (environment variables, all optional):
 | `HENKA_PUBLISH_PORT` | `8181` | Host port. |
 | `HENKA_WORKSPACES_DIR` | _(required)_ | Host directory of working copies, mounted read-write at `/workspaces`. The compose file also uses it to build the path-translation map. |
 | `HENKA_PATH_MAP` | _(none)_ | Extra `host=container` prefix rewrites (comma-separated) for additional mounts, appended to the `HENKA_WORKSPACES_DIR`→`/workspaces` rewrite the compose file derives. |
+| `HENKA_UID` / `HENKA_GID` | `0` / `0` (root) | Uid/gid the container runs as. Set to your own (`id -u` / `id -g`) so files Henka writes are owned by you. |
 | `HENKA_DATA_DIR` | `henka-data` (named volume) | Where the registry and indexes persist. |
 | `HENKA_LOG` | `info` | Log filter (`tracing` env-filter syntax). |
 
@@ -52,14 +53,29 @@ the project registry at `/data/projects.toml` and the warm per-repository
 indexes under `/data/workspaces`. Mounting `/data` to a host directory or volume
 is all it takes to persist everything across restarts.
 
+### File ownership
+
+Henka writes in two places: edits into the working copies under `/workspaces`
+(including the `.jj`/`.git` snapshots VCS makes), and its own state under
+`/data`. By default the container runs as root, so those files end up root-owned
+on the host. Run it as your own user instead — set `HENKA_UID`/`HENKA_GID` (the
+compose file passes them to `user:`), or launch with
+`HENKA_UID=$(id -u) HENKA_GID=$(id -g) docker compose up -d`. The image makes
+`/data` and `HOME` writable by any uid, so an arbitrary user can run it; the
+managed `henka-data` volume is seeded world-writable for the same reason.
+
 ## Running the image directly
 
 ```sh
 docker run --rm -p 127.0.0.1:8181:8181 \
+  --user "$(id -u):$(id -g)" \
   -v henka-data:/data \
   -v "$PWD/workspaces:/workspaces:rw" \
   ghcr.io/martint/henka:latest
 ```
+
+`--user` makes the files Henka writes owned by you rather than root; drop it to
+run as root.
 
 The default command is `--transport http --bind 0.0.0.0:8181`. Pass extra
 configuration through the environment rather than overriding it (see the

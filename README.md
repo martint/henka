@@ -48,8 +48,11 @@ A prebuilt image bundles Henka and the language servers it drives (no host toolc
 ```sh
 cp docker-compose.yml.example docker-compose.yml
 cp .env.example .env          # then set HENKA_WORKSPACES_DIR
-docker compose up -d          # serves MCP at http://127.0.0.1:8181/mcp
+HENKA_UID=$(id -u) HENKA_GID=$(id -g) \
+  docker compose up -d        # serves MCP at http://127.0.0.1:8181/mcp
 ```
+
+Setting `HENKA_UID`/`HENKA_GID` runs the container as you, so the edits Henka writes into your repos are owned by you and not root; leave them unset to run as root.
 
 The container sees its working copies under `/workspaces`, not at their host paths, so a client that speaks host paths would otherwise have to register projects by their in-container path. It doesn't need to: Henka rewrites caller-supplied paths (a project root, a `workspace`, an absolute `file`) by `host=container` prefix, and the compose file wires that up from your `HENKA_WORKSPACES_DIR` and the `/workspaces` mount automatically. For more mounts, append extra `host=container` rewrites in `HENKA_PATH_MAP`.
 
