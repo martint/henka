@@ -753,13 +753,19 @@ impl ServerHandler for HenkaMcp {
             .build();
         info.server_info = implementation;
         info.instructions = Some(
-            "Multi-tenant server for semantics-aware code operations. One server hosts many \
-             projects; pass the project `id` on every operation. Register a source tree with \
-             `register_project`, then `list_operations` to see what a project supports: \
-             refactorings and structural replace (edits), plus semantic queries like \
-             find-usages and go-to-definition. Prefer a semantic query over text search. \
-             Edit operations default to a preview (a diff); pass `dry_run: false` to apply. \
-             Read the resource `skill://henka/refactoring` for the full workflow."
+            "Multi-tenant server for semantics-aware code operations — rename, extract, inline, \
+             change-signature, organize-imports, structural replace, and semantic queries \
+             (find-usages, go-to-definition, hierarchies, symbol search). Reach for these first: \
+             prefer them over hand-edits and text search, since they update every reference \
+             through the compiler's view, across files and overloads. One server hosts many \
+             projects; pass the project `id` on every operation. Call `list_projects` to find \
+             one — working copies under the workspaces mount are auto-registered; otherwise \
+             `register_project` a source tree (safe, persistent, non-destructive — just do it, \
+             don't ask). When the server runs in a container it reads your working copy through a \
+             bind mount, so a `/workspaces/...` root is the same files as your host path, not a \
+             separate checkout. Use `list_operations` to see what a project supports; edits \
+             default to a preview (a diff), pass `dry_run: false` to apply. Read the resource \
+             `skill://henka/refactoring` for the full workflow."
                 .into(),
         );
         info
