@@ -153,6 +153,52 @@ struct ListOperationsParams {
 struct NoParams {}
 
 // ---------------------------------------------------------------------------
+// Registration result
+// ---------------------------------------------------------------------------
+
+/// A successful registration, plus an explanation when the path map rewrote the
+/// caller's root onto a mount Henka sees.
+#[derive(Debug, serde::Serialize)]
+struct RegisterResult<'a> {
+    #[serde(flatten)]
+    project: &'a Project,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    translation: Option<PathTranslation>,
+}
+
+/// How a caller-supplied path was rewritten onto the location Henka reads, with
+/// a note reassuring that the two name the same files.
+#[derive(Debug, serde::Serialize)]
+struct PathTranslation {
+    /// The path the caller supplied.
+    from: PathBuf,
+    /// The path Henka resolved it to and now reads the project at.
+    to: PathBuf,
+    /// Plain-language reassurance for the caller.
+    note: String,
+}
+
+impl PathTranslation {
+    /// Describe a host→mount rewrite: the same tree, reachable under a different
+    /// prefix inside Henka.
+    fn mount(from: &Path, to: &Path) -> Self {
+        let note = format!(
+            "Henka reads this project at `{}`, the configured mount for your `{}`. \
+             It is the same tree on disk (a bind mount), not a separate checkout — \
+             coordinates and revisions you computed against your copy still apply. \
+             project_status reports the same path under `host_path`.",
+            to.display(),
+            from.display(),
+        );
+        Self {
+            from: from.to_path_buf(),
+            to: to.to_path_buf(),
+            note,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Project status
 // ---------------------------------------------------------------------------
 
@@ -168,6 +214,12 @@ struct ProjectStatus<'a> {
     /// The VCS state of the project root, or `null` when it is not a jj/git
     /// working copy.
     vcs: Option<VcsStatus>,
+    /// The caller-side (host) path this in-container root corresponds to, when
+    /// the project sits under a path-map mount. Lets a caller confirm that the
+    /// `/workspaces/...` root Henka reports is its own working copy, not a
+    /// separate checkout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host_path: Option<PathBuf>,
 }
 
 /// The version-control state of a project root.
@@ -189,7 +241,7 @@ struct VcsStatus {
 /// Gather the project plus the VCS state of its root. Detecting the revision is
 /// read-only; the dirty check snapshots the working copy (jj's normal
 /// behavior), matching how operations already read the tree.
-fn project_status(project: &Project) -> ProjectStatus<'_> {
+fn project_status<'a>(project: &'a Project, path_map: &PathMap) -> ProjectStatus<'a> {
     let vcs = detect_revision(&project.root).map(|rev| VcsStatus {
         vcs: rev.vcs.to_string(),
         revision: rev.id,
@@ -197,7 +249,12 @@ fn project_status(project: &Project) -> ProjectStatus<'_> {
         repo_root: repo_identity(&project.root).map(|id| id.path),
         dirty: !working_copy_delta(&project.root).is_empty(),
     });
-    ProjectStatus { project, vcs }
+    let host_path = path_map.reverse(&project.root);
+    ProjectStatus {
+        project,
+        vcs,
+        host_path,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -256,10 +313,24 @@ impl HenkaMcp {
         match request.name.as_ref() {
             "register_project" => {
                 let p: RegisterProjectParams = parse_args(request.arguments)?;
-                let root = self.path_map.map(Path::new(&p.root));
+                let requested = PathBuf::from(&p.root);
+                let root = self.path_map.map(&requested);
+                let rewritten = root != requested;
                 let mut reg = self.registry.write().await;
                 match reg.register(p.id, root) {
-                    Ok(project) => ok_json(&project),
+                    Ok(project) => {
+                        // When the path map rewrote the caller's root, say so
+                        // explicitly: the rewrite is the configured mount, and
+                        // the result is the same tree (a bind mount), not a
+                        // separate checkout — the misread that otherwise makes
+                        // callers distrust the registration.
+                        let translation = rewritten
+                            .then(|| PathTranslation::mount(&requested, &project.root));
+                        ok_json(&RegisterResult {
+                            project: &project,
+                            translation,
+                        })
+                    }
                     // A missing path usually means the caller named a path Henka
                     // cannot see (its own filesystem differs, e.g. a container
                     // mount). Help them find the path Henka does see.
@@ -289,7 +360,7 @@ impl HenkaMcp {
                 let p: ProjectIdParams = parse_args(request.arguments)?;
                 let reg = self.registry.read().await;
                 let project = reg.get(&p.id).map_err(into_mcp)?;
-                ok_json(&project_status(project))
+                ok_json(&project_status(project, &self.path_map))
             }
             "list_operations" => {
                 let p: ListOperationsParams = parse_args(request.arguments)?;
@@ -1161,6 +1232,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn project_status_reports_host_path_under_mount() {
+        // With a path map active, status reverse-maps the in-container root back
+        // to the caller's own path, so a caller can confirm it's their copy.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut mcp, root) = handler_with_project(dir.path());
+        let canon_root = root.canonicalize().unwrap();
+        let parent = canon_root.parent().unwrap();
+        mcp.path_map = Arc::new(PathMap::parse(&format!("/host/src={}", parent.display())));
+
+        let res = mcp
+            .handle_call(call("project_status", args(json!({ "id": "p" }))))
+            .await
+            .unwrap();
+        let text = match &res.content[0].raw {
+            rmcp::model::RawContent::Text(t) => t.text.clone(),
+            _ => panic!("expected text content"),
+        };
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            value.get("host_path").and_then(Value::as_str),
+            Some("/host/src/proj")
+        );
+    }
+
+    #[tokio::test]
     async fn register_project_suggests_matching_mount() {
         // handler_with_project registers `p` at <tmp>/proj, so <tmp> is scanned.
         let dir = tempfile::tempdir().unwrap();
@@ -1215,6 +1311,26 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(res.is_error, Some(true));
+
+        // The response explains the rewrite: the caller's path, the path Henka
+        // reads, and that they are the same tree.
+        let text = match &res.content[0].raw {
+            rmcp::model::RawContent::Text(t) => t.text.clone(),
+            _ => panic!("expected text content"),
+        };
+        let value: Value = serde_json::from_str(&text).unwrap();
+        let translation = value.get("translation").expect("translation reported");
+        assert_eq!(
+            translation.get("from").and_then(Value::as_str),
+            Some("/virtual/host/svc")
+        );
+        assert!(
+            translation
+                .get("note")
+                .and_then(Value::as_str)
+                .is_some_and(|n| n.contains("same tree")),
+            "note reassures same tree: {translation}"
+        );
 
         let reg = mcp.registry.read().await;
         assert_eq!(reg.get("svc").unwrap().root, proj.canonicalize().unwrap());

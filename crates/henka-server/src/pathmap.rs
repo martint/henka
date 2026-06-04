@@ -72,6 +72,23 @@ impl PathMap {
         }
         best.map_or_else(|| path.to_path_buf(), |(_, mapped)| mapped)
     }
+
+    /// Rewrite a container path back to its caller-side (host) path by the
+    /// longest matching container prefix, or `None` when no prefix matches. The
+    /// inverse of [`map`](PathMap::map), for showing a caller which of its own
+    /// paths a mounted project root corresponds to.
+    pub fn reverse(&self, path: &Path) -> Option<PathBuf> {
+        let mut best: Option<(usize, PathBuf)> = None;
+        for (host, container) in &self.entries {
+            if let Ok(rest) = path.strip_prefix(container) {
+                let depth = container.components().count();
+                if best.as_ref().is_none_or(|(d, _)| depth > *d) {
+                    best = Some((depth, host.join(rest)));
+                }
+            }
+        }
+        best.map(|(_, mapped)| mapped)
+    }
 }
 
 #[cfg(test)]
@@ -96,6 +113,21 @@ mod tests {
             map.map(Path::new("/home/me/docs")),
             PathBuf::from("/broad/docs")
         );
+    }
+
+    #[test]
+    fn reverse_maps_container_paths_back_to_host() {
+        let map = PathMap::parse("/home/me/src=/workspaces, /data/repos=/mnt/repos");
+        assert_eq!(
+            map.reverse(Path::new("/workspaces/trino.multiset")),
+            Some(PathBuf::from("/home/me/src/trino.multiset"))
+        );
+        assert_eq!(
+            map.reverse(Path::new("/mnt/repos/svc")),
+            Some(PathBuf::from("/data/repos/svc"))
+        );
+        // A path under no container prefix has no host counterpart.
+        assert_eq!(map.reverse(Path::new("/elsewhere/x")), None);
     }
 
     #[test]
