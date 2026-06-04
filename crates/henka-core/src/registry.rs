@@ -83,6 +83,52 @@ impl ProjectRegistry {
         Ok(project)
     }
 
+    /// Auto-register every immediate subdirectory of each `root` that has a
+    /// detected language and is not already registered, deriving each id from
+    /// the directory name. Returns the ids newly registered.
+    ///
+    /// Best-effort and idempotent: roots that cannot be read, entries that are
+    /// not directories, directories with no detected language, and id
+    /// collisions are all skipped silently. It is meant for auto-populating
+    /// from a workspaces mount whose children are checkouts/worktrees, so that
+    /// callers can target projects without registering them by hand.
+    pub fn auto_register(&mut self, roots: &[PathBuf]) -> Vec<String> {
+        let mut added = Vec::new();
+        for root in roots {
+            let Ok(entries) = std::fs::read_dir(root) else {
+                continue;
+            };
+            let mut dirs: Vec<PathBuf> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+            // A stable order keeps id derivation deterministic when two sibling
+            // names would collide to the same slug (the first one wins).
+            dirs.sort();
+            for dir in dirs {
+                // Skip a directory already registered (possibly under a
+                // hand-chosen id) so a rescan never registers the same tree
+                // twice.
+                if self.is_registered_root(&dir) {
+                    continue;
+                }
+                if let Ok(project) = self.register(None, &dir) {
+                    added.push(project.id);
+                }
+            }
+        }
+        added
+    }
+
+    /// Whether `dir` is already registered as some project's root, comparing by
+    /// canonical path (roots are canonicalized at registration).
+    fn is_registered_root(&self, dir: &Path) -> bool {
+        let canon = dir.canonicalize();
+        let canon = canon.as_deref().unwrap_or(dir);
+        self.projects.values().any(|p| p.root == canon)
+    }
+
     /// Remove a registered project, returning it. Source is never touched.
     pub fn unregister(&mut self, id: &str) -> Result<Project> {
         let project = self
@@ -342,6 +388,54 @@ mod tests {
         let mut reg = ProjectRegistry::load(&cfg).unwrap();
         let err = reg.register(Some("empty".into()), &empty).unwrap_err();
         assert!(matches!(err, Error::NoLanguageDetected(_)));
+    }
+
+    #[test]
+    fn auto_registers_child_projects_idempotently() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("projects.toml");
+        let workspaces = tmp.path().join("workspaces");
+        std::fs::create_dir_all(&workspaces).unwrap();
+        java_project("svc-a", &workspaces);
+        java_project("svc-b", &workspaces);
+        // A child with no detectable language is skipped.
+        std::fs::create_dir_all(workspaces.join("empty")).unwrap();
+
+        let mut reg = ProjectRegistry::load(&cfg).unwrap();
+        let mut added = reg.auto_register(&[workspaces.clone()]);
+        added.sort();
+        assert_eq!(added, vec!["svc-a".to_string(), "svc-b".to_string()]);
+
+        // A second scan adds nothing — registration is not duplicated.
+        assert!(reg.auto_register(&[workspaces.clone()]).is_empty());
+        assert_eq!(reg.len(), 2);
+    }
+
+    #[test]
+    fn auto_register_skips_root_already_registered_under_custom_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("projects.toml");
+        let workspaces = tmp.path().join("workspaces");
+        std::fs::create_dir_all(&workspaces).unwrap();
+        let svc = java_project("svc", &workspaces);
+
+        let mut reg = ProjectRegistry::load(&cfg).unwrap();
+        // Pre-register the same tree under a hand-chosen id.
+        reg.register(Some("custom".into()), &svc).unwrap();
+
+        // The scan must not register the tree again under its derived id.
+        assert!(reg.auto_register(&[workspaces]).is_empty());
+        assert_eq!(reg.len(), 1);
+        assert!(reg.get("svc").is_err());
+    }
+
+    #[test]
+    fn auto_register_ignores_unreadable_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("projects.toml");
+        let mut reg = ProjectRegistry::load(&cfg).unwrap();
+        // A non-existent root is silently skipped, not an error.
+        assert!(reg.auto_register(&[tmp.path().join("nope")]).is_empty());
     }
 
     #[test]

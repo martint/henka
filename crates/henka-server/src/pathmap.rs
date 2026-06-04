@@ -51,6 +51,13 @@ impl PathMap {
         self.entries.is_empty()
     }
 
+    /// The container-side prefix of each rewrite (the right-hand sides) — the
+    /// locations Henka actually sees mounted working copies under. Used to
+    /// derive where to look for projects to auto-register.
+    pub fn container_prefixes(&self) -> Vec<PathBuf> {
+        self.entries.iter().map(|(_, c)| c.clone()).collect()
+    }
+
     /// Rewrite `path` by its longest matching host prefix, or return it
     /// unchanged when no prefix matches (including for relative paths).
     pub fn map(&self, path: &Path) -> PathBuf {

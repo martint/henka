@@ -43,7 +43,7 @@ Environment mirrors and discovery: `HENKA_DATA` (single root for all persistent 
 
 ### With Docker
 
-A prebuilt image bundles Henka and the language servers it drives (no host toolchain needed). Copy the example compose and env files, point `HENKA_WORKSPACES_DIR` at a host directory of working copies (mounted at `/workspaces`), and register each as a project by its in-container path:
+A prebuilt image bundles Henka and the language servers it drives (no host toolchain needed). Copy the example compose and env files and point `HENKA_WORKSPACES_DIR` at a host directory of working copies (mounted at `/workspaces`); each working copy under it is auto-registered as a project, so a client can operate on it straight away:
 
 ```sh
 cp docker-compose.yml.example docker-compose.yml

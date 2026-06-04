@@ -18,12 +18,14 @@ version control.
 
 `HENKA_WORKSPACES_DIR` is a host directory of working copies, mounted read-write
 at `/workspaces`. This serves MCP over streamable HTTP at
-`http://127.0.0.1:8181/mcp`. Register a working copy as a **project** by its
-in-container path (e.g. `/workspaces/my-service`), then call operations against
-it. A project is a repository; its git worktrees / jj workspaces can sit as
-sibling directories under `/workspaces`, and Henka groups them by repository so
-they share one index — the `workspace` argument on an operation then selects
-which working copy an edit lands in.
+`http://127.0.0.1:8181/mcp`. Each working copy under `/workspaces` is
+auto-registered as a **project** (named after its directory), so a client can
+call operations against it without a `register_project` step; a working copy
+mounted elsewhere can still be registered explicitly by its in-container path. A
+project is a repository; its git worktrees / jj workspaces can sit as sibling
+directories under `/workspaces`, and Henka groups them by repository so they
+share one index — the `workspace` argument on an operation then selects which
+working copy an edit lands in.
 
 A client running outside the container speaks host paths, which do not exist at
 that spelling inside it. Henka bridges this with `HENKA_PATH_MAP`: `host=container`
@@ -44,6 +46,7 @@ Configuration knobs (environment variables, all optional):
 | `HENKA_PUBLISH_PORT` | `8181` | Host port. |
 | `HENKA_WORKSPACES_DIR` | _(required)_ | Host directory of working copies, mounted read-write at `/workspaces`. The compose file also uses it to build the path-translation map. |
 | `HENKA_PATH_MAP` | _(none)_ | Extra `host=container` prefix rewrites (comma-separated) for additional mounts, appended to the `HENKA_WORKSPACES_DIR`→`/workspaces` rewrite the compose file derives. |
+| `HENKA_AUTO_REGISTER_ROOTS` | path-map mounts + `/workspaces` | Directories whose immediate children are auto-registered as projects (comma-separated). Set empty to disable and register every project by hand. |
 | `HENKA_UID` / `HENKA_GID` | `0` / `0` (root) | Uid/gid the container runs as. Set to your own (`id -u` / `id -g`) so files Henka writes are owned by you. |
 | `HENKA_DATA_DIR` | `henka-data` (named volume) | Where the registry and indexes persist. |
 | `HENKA_LOG` | `info` | Log filter (`tracing` env-filter syntax). |

@@ -72,6 +72,9 @@ async fn main() -> anyhow::Result<()> {
 
     let providers = build_providers();
     let handler = HenkaMcp::new(registry, providers);
+    // Auto-register projects sitting under the workspace roots, so a client can
+    // operate on them without a manual register_project call.
+    handler.warm_registry().await;
 
     match cli.transport {
         Transport::Stdio => {

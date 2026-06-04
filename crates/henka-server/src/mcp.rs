@@ -49,6 +49,9 @@ pub struct HenkaMcp {
     /// Rewrites caller-supplied paths to the paths Henka sees (e.g. a host
     /// prefix mounted under a different path in a container).
     path_map: Arc<PathMap>,
+    /// Directories whose immediate children are auto-registered as projects (a
+    /// workspaces mount). Scanned once at startup and again on `list_projects`.
+    auto_register_roots: Arc<Vec<PathBuf>>,
 }
 
 impl HenkaMcp {
@@ -62,13 +65,62 @@ impl HenkaMcp {
         if !path_map.is_empty() {
             tracing::info!("translating caller paths via HENKA_PATH_MAP");
         }
+        let auto_register_roots = auto_register_roots(&path_map);
+        if !auto_register_roots.is_empty() {
+            tracing::info!(roots = ?auto_register_roots, "auto-registering projects under workspace roots");
+        }
         Self {
             registry: Arc::new(RwLock::new(registry)),
             providers: Arc::new(providers),
             operations: Arc::new(operations),
             path_map: Arc::new(path_map),
+            auto_register_roots: Arc::new(auto_register_roots),
         }
     }
+
+    /// Scan the configured workspace roots and register any unregistered child
+    /// projects. Called once at startup and again on `list_projects`, so a
+    /// worktree created after the server started is picked up without a
+    /// restart. A no-op when no roots are configured.
+    pub async fn warm_registry(&self) {
+        if self.auto_register_roots.is_empty() {
+            return;
+        }
+        let added = {
+            let mut reg = self.registry.write().await;
+            reg.auto_register(&self.auto_register_roots)
+        };
+        if !added.is_empty() {
+            tracing::info!(count = added.len(), "auto-registered projects");
+        }
+    }
+}
+
+/// The directories whose immediate children Henka auto-registers as projects.
+///
+/// `HENKA_AUTO_REGISTER_ROOTS` (comma/semicolon/newline-separated absolute
+/// paths) when set — set it empty to disable. Otherwise the path map's
+/// container-side prefixes plus the conventional `/workspaces` mount. Only
+/// existing directories are kept, so on a host without a workspaces mount this
+/// is simply empty.
+fn auto_register_roots(path_map: &PathMap) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = match std::env::var("HENKA_AUTO_REGISTER_ROOTS") {
+        Ok(spec) => spec
+            .split([',', ';', '\n'])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .collect(),
+        Err(_) => {
+            let mut defaults = path_map.container_prefixes();
+            defaults.push(PathBuf::from("/workspaces"));
+            defaults
+        }
+    };
+    roots.retain(|p| p.is_dir());
+    roots.sort();
+    roots.dedup();
+    roots
 }
 
 // ---------------------------------------------------------------------------
@@ -227,6 +279,8 @@ impl HenkaMcp {
             }
             "list_projects" => {
                 let _: NoParams = parse_args(request.arguments)?;
+                // Pick up worktrees created since the last scan before listing.
+                self.warm_registry().await;
                 let reg = self.registry.read().await;
                 let projects: Vec<&Project> = reg.list().collect();
                 ok_json(&projects)
@@ -1164,6 +1218,33 @@ mod tests {
 
         let reg = mcp.registry.read().await;
         assert_eq!(reg.get("svc").unwrap().root, proj.canonicalize().unwrap());
+    }
+
+    #[tokio::test]
+    async fn list_projects_auto_registers_under_workspace_roots() {
+        // A workspaces root with a child project Henka has never been told
+        // about: listing projects scans the root and surfaces it.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut mcp, _) = handler_with_project(dir.path());
+
+        let workspaces = dir.path().join("workspaces");
+        let child = workspaces.join("svc-x");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(child.join("pom.xml"), "<project/>").unwrap();
+        mcp.auto_register_roots = Arc::new(vec![workspaces]);
+
+        let res = mcp
+            .handle_call(call("list_projects", args(json!({}))))
+            .await
+            .unwrap();
+        let text = match &res.content[0].raw {
+            rmcp::model::RawContent::Text(t) => t.text.clone(),
+            _ => panic!("expected text content"),
+        };
+        assert!(
+            text.contains("svc-x"),
+            "expected auto-registered project in listing, got: {text}"
+        );
     }
 
     #[tokio::test]
