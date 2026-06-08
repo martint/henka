@@ -109,6 +109,11 @@ pub struct CodeActionOp {
     description: &'static str,
     /// The LSP code action kind to select (e.g. `refactor.extract.variable`).
     action_kind: &'static str,
+    /// A substring the chosen action's title must contain (case-insensitive).
+    /// Disambiguates when several distinct refactorings share one kind — e.g.
+    /// `refactor.inline` hosts both "Inline Method" and "Make Static", and only
+    /// the former is what `inline` means.
+    prefer_title: Option<&'static str>,
     target: TargetKind,
 }
 
@@ -125,8 +130,16 @@ impl CodeActionOp {
             title,
             description,
             action_kind,
+            prefer_title: None,
             target,
         }
+    }
+
+    /// Require the chosen action's title to contain `substring`, so a kind that
+    /// hosts more than one refactoring resolves to the intended one.
+    fn preferring(mut self, substring: &'static str) -> Self {
+        self.prefer_title = Some(substring);
+        self
     }
 
     /// The extract refactorings and friends contributed for Java.
@@ -160,13 +173,18 @@ impl CodeActionOp {
                 "refactor.extract.function",
                 TargetKind::Selection,
             )),
-            std::sync::Arc::new(Self::new(
-                "inline",
-                "Inline",
-                "Inline the local variable or constant at the position",
-                "refactor.inline",
-                TargetKind::Position,
-            )),
+            std::sync::Arc::new(
+                Self::new(
+                    "inline",
+                    "Inline",
+                    "Inline the local variable, constant, or method at the position",
+                    "refactor.inline",
+                    TargetKind::Position,
+                )
+                // `refactor.inline` also carries "Make Static" at a method;
+                // keep only the actual inline refactoring.
+                .preferring("Inline"),
+            ),
             std::sync::Arc::new(Self::new(
                 "organize-imports",
                 "Organize imports",
@@ -240,21 +258,27 @@ impl Operation for CodeActionOp {
             .await
             .map_err(backend)?;
 
-        // Choose the action of the requested kind, preferring a single-target
-        // variant over a "replace all occurrences" one.
+        // Choose the action of the requested kind. When a kind hosts several
+        // refactorings, narrow to the one whose title matches this op (so we
+        // never apply a neighbour like "Make Static" for an inline); then
+        // prefer a single-target variant over a "replace all occurrences" one.
+        let prefer = self.prefer_title.map(str::to_ascii_lowercase);
+        let title_of = |a: &Value| {
+            a.get("title")
+                .and_then(Value::as_str)
+                .map(str::to_ascii_lowercase)
+        };
         let chosen = actions
             .as_array()
             .map(Vec::as_slice)
             .unwrap_or_default()
             .iter()
             .filter(|a| a.get("kind").and_then(Value::as_str) == Some(self.action_kind))
-            .min_by_key(|a| {
-                let multi = a
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .is_some_and(|t| t.contains("occurrence"));
-                u8::from(multi)
+            .filter(|a| match &prefer {
+                Some(want) => title_of(a).is_some_and(|t| t.contains(want.as_str())),
+                None => true,
             })
+            .min_by_key(|a| u8::from(title_of(a).is_some_and(|t| t.contains("occurrence"))))
             .cloned()
             .ok_or_else(|| {
                 CoreError::OperationNotAvailable(format!(

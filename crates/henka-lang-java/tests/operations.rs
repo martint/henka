@@ -354,3 +354,50 @@ async fn inline_local_variable() {
     );
     assert!(after.contains("return 5 + 1"), "inlined the value: {after}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "launches a real jdtls JVM; run with --ignored"]
+async fn inline_method() {
+    // jdtls offers two `refactor.inline` actions at a method — "Inline Method"
+    // and "Make Static" — so this exercises that `inline` selects the actual
+    // inline refactoring rather than a neighbour sharing the kind.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("Inl.java"),
+        "public class Inl {\n    int f() {\n        return g() + 1;\n    }\n    int g() {\n        return 5;\n    }\n}\n",
+    )
+    .unwrap();
+
+    let session = session_for(root).await;
+    let project = project(root);
+    let ctx = OperationCtx {
+        project: &project,
+        session,
+    };
+
+    // Position on `g` in its declaration (line 4, col 8).
+    run_and_apply(
+        op("inline").as_ref(),
+        &ctx,
+        OperationRequest {
+            target: Target::Position {
+                file: PathBuf::from("Inl.java"),
+                position: Position::new(4, 8),
+            },
+            params: json!({}),
+        },
+        root,
+    )
+    .await;
+
+    let after = std::fs::read_to_string(root.join("Inl.java")).unwrap();
+    assert!(
+        after.contains("return 5 + 1"),
+        "inlined the method body at the call site: {after}"
+    );
+    assert!(
+        !after.contains("int g()"),
+        "removed the inlined method: {after}"
+    );
+}
