@@ -112,6 +112,11 @@ impl RaSession {
         Ok(self.session.ensure_indexed().await?)
     }
 
+    /// Search the project for symbols matching `query`, capped at `limit`.
+    pub async fn symbol_search(&self, query: &str, limit: usize) -> Result<Value> {
+        Ok(self.session.symbol_search(query, limit).await?)
+    }
+
     /// Sync files changed on disk back into the server.
     pub async fn sync_changed_impl(&self, changed: &[PathBuf]) {
         self.session.sync_changed(changed).await;

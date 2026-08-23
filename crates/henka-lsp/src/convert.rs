@@ -75,6 +75,26 @@ struct LspLocation {
     range: LspRange,
 }
 
+/// A `workspace/symbol` match's location. LSP 3.17 allows a `WorkspaceSymbol`
+/// to report just a `uri`, leaving `range` for a later `workspaceSymbol/resolve`
+/// call; Henka doesn't advertise that capability, so such a symbol is dropped
+/// rather than resolved.
+#[derive(Debug, Deserialize)]
+struct LspSymbolLocation {
+    uri: String,
+    #[serde(default)]
+    range: Option<LspRange>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LspSymbolInfo {
+    name: String,
+    kind: u32,
+    location: LspSymbolLocation,
+    #[serde(rename = "containerName", default)]
+    container_name: Option<String>,
+}
+
 impl From<LspPosition> for Position {
     fn from(p: LspPosition) -> Self {
         Position::new(p.line, p.character)
@@ -210,6 +230,105 @@ pub fn locations_to_query(value: Value, root: &Path) -> Result<Value> {
     Ok(json!({ "count": usages.len(), "usages": usages }))
 }
 
+/// The default cap on the number of symbols `symbols_to_query` returns when
+/// the caller doesn't specify a `limit`.
+pub const DEFAULT_SYMBOL_SEARCH_LIMIT: usize = 200;
+
+/// Convert an LSP `SymbolInformation[]` (or `WorkspaceSymbol[]`) response
+/// from `workspace/symbol` into a structured symbol-search result, with
+/// paths expressed relative to `root` where possible and matches capped at
+/// `limit`.
+///
+/// `count` always reports the total number matched, even when the returned
+/// `symbols` list is truncated to `limit` — a truncated response also carries
+/// `"truncated": true` so the caller knows to narrow its query rather than
+/// assuming it saw everything.
+pub fn symbols_to_query(value: Value, root: &Path, limit: usize) -> Result<Value> {
+    if value.is_null() {
+        return Ok(json!({ "count": 0, "symbols": [] }));
+    }
+    let items: Vec<LspSymbolInfo> = serde_json::from_value(value)?;
+
+    // A symbol without a range is a `WorkspaceSymbol` awaiting resolve; Henka
+    // doesn't resolve it, so drop it instead of failing the batch.
+    let matched: Vec<(LspSymbolInfo, LspRange)> = items
+        .into_iter()
+        .filter_map(|mut s| s.location.range.take().map(|range| (s, range)))
+        .collect();
+
+    // Count first, cap second, build last: the matches past the cap are never
+    // returned, so nothing should be spent describing them.
+    let total = matched.len();
+    let truncated = total > limit;
+
+    let symbols: Vec<Value> = matched
+        .into_iter()
+        .take(limit)
+        .map(|(s, range)| {
+            let path = uri_to_path(&s.location.uri);
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            let mut obj = json!({
+                "name": s.name,
+                "kind": symbol_kind_name(s.kind),
+                "file": rel,
+                "start_line": range.start.line,
+                "start_character": range.start.character,
+                "end_line": range.end.line,
+                "end_character": range.end.character,
+            });
+            if let Some(container) = s.container_name {
+                obj["container_name"] = json!(container);
+            }
+            obj
+        })
+        .collect();
+
+    let mut out = json!({ "count": total, "symbols": symbols });
+    if truncated {
+        out["truncated"] = json!(true);
+    }
+    Ok(out)
+}
+
+/// Map an LSP `SymbolKind` (1-26) to a lowercase name, so a result is
+/// self-describing without the caller needing the LSP spec memorized.
+fn symbol_kind_name(kind: u32) -> String {
+    match kind {
+        1 => "file",
+        2 => "module",
+        3 => "namespace",
+        4 => "package",
+        5 => "class",
+        6 => "method",
+        7 => "property",
+        8 => "field",
+        9 => "constructor",
+        10 => "enum",
+        11 => "interface",
+        12 => "function",
+        13 => "variable",
+        14 => "constant",
+        15 => "string",
+        16 => "number",
+        17 => "boolean",
+        18 => "array",
+        19 => "object",
+        20 => "key",
+        21 => "null",
+        22 => "enum_member",
+        23 => "struct",
+        24 => "event",
+        25 => "operator",
+        26 => "type_parameter",
+        other => return other.to_string(),
+    }
+    .to_string()
+}
+
 /// Convert a `file://` URI back to a path, decoding the characters we encode.
 pub fn uri_to_path(uri: &str) -> PathBuf {
     let rest = uri.strip_prefix("file://").unwrap_or(uri);
@@ -310,5 +429,108 @@ mod tests {
             uri_to_path("file:///a/b%20c/D.java"),
             PathBuf::from("/a/b c/D.java")
         );
+    }
+
+    #[test]
+    fn null_symbol_search_is_empty() {
+        let out = symbols_to_query(Value::Null, Path::new("/proj"), 10).unwrap();
+        assert_eq!(out, json!({ "count": 0, "symbols": [] }));
+    }
+
+    #[test]
+    fn symbol_path_relative_to_root() {
+        let value = json!([{
+            "name": "Foo",
+            "kind": 5,
+            "location": {
+                "uri": "file:///proj/src/Foo.java",
+                "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 3}}
+            }
+        }]);
+        let out = symbols_to_query(value, Path::new("/proj"), 10).unwrap();
+        assert_eq!(out["symbols"][0]["file"], json!("src/Foo.java"));
+        assert_eq!(out["symbols"][0]["kind"], json!("class"));
+    }
+
+    #[test]
+    fn symbol_path_outside_root_stays_absolute() {
+        let value = json!([{
+            "name": "Foo",
+            "kind": 5,
+            "location": {
+                "uri": "file:///other/Foo.java",
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}}
+            }
+        }]);
+        let out = symbols_to_query(value, Path::new("/proj"), 10).unwrap();
+        assert_eq!(out["symbols"][0]["file"], json!("/other/Foo.java"));
+    }
+
+    #[test]
+    fn container_name_present_and_absent() {
+        let value = json!([
+            {
+                "name": "bar",
+                "kind": 6,
+                "location": {
+                    "uri": "file:///proj/Foo.java",
+                    "range": {"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 3}}
+                },
+                "containerName": "Foo"
+            },
+            {
+                "name": "Foo",
+                "kind": 5,
+                "location": {
+                    "uri": "file:///proj/Foo.java",
+                    "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}}
+                }
+            }
+        ]);
+        let out = symbols_to_query(value, Path::new("/proj"), 10).unwrap();
+        assert_eq!(out["symbols"][0]["container_name"], json!("Foo"));
+        assert!(out["symbols"][1].get("container_name").is_none());
+    }
+
+    #[test]
+    fn symbol_missing_range_is_dropped_not_fatal() {
+        let value = json!([
+            {
+                "name": "Unresolved",
+                "kind": 5,
+                "location": { "uri": "file:///proj/Foo.java" }
+            },
+            {
+                "name": "Resolved",
+                "kind": 5,
+                "location": {
+                    "uri": "file:///proj/Foo.java",
+                    "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}}
+                }
+            }
+        ]);
+        let out = symbols_to_query(value, Path::new("/proj"), 10).unwrap();
+        assert_eq!(out["count"], json!(1));
+        assert_eq!(out["symbols"][0]["name"], json!("Resolved"));
+    }
+
+    #[test]
+    fn symbol_search_truncates_and_reports_total() {
+        let matches: Vec<Value> = (0..5)
+            .map(|i| {
+                json!({
+                    "name": format!("Foo{i}"),
+                    "kind": 5,
+                    "location": {
+                        "uri": format!("file:///proj/Foo{i}.java"),
+                        "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}}
+                    }
+                })
+            })
+            .collect();
+        let out = symbols_to_query(json!(matches), Path::new("/proj"), 2).unwrap();
+        assert_eq!(out["count"], json!(5));
+        assert_eq!(out["symbols"].as_array().unwrap().len(), 2);
+        assert_eq!(out["truncated"], json!(true));
     }
 }

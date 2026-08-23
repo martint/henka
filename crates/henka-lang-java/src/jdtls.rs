@@ -244,6 +244,11 @@ impl JdtlsSession {
         Ok(self.session.ensure_indexed().await?)
     }
 
+    /// Search the project for symbols matching `query`, capped at `limit`.
+    pub async fn symbol_search(&self, query: &str, limit: usize) -> Result<Value> {
+        Ok(self.session.symbol_search(query, limit).await?)
+    }
+
     /// Open the given files and wait for the server to reconcile them.
     pub async fn open_and_reconcile(&self, paths: &[PathBuf]) -> Result<()> {
         Ok(self.session.open_and_reconcile(paths).await?)

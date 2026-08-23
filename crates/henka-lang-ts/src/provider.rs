@@ -15,7 +15,7 @@ use henka_core::{Error as CoreError, Language, Project, Result as CoreResult, re
 use tokio::sync::Mutex;
 
 use crate::error::TsError;
-use crate::operations::{CodeActionOp, FindUsagesOp, RenameOp};
+use crate::operations::{CodeActionOp, FindUsagesOp, RenameOp, SymbolSearchOp};
 use crate::server::{TsSession, locate};
 
 /// The languages this backend serves; register the provider for all of them.
@@ -94,7 +94,8 @@ impl LanguageProvider for TsProvider {
     }
 
     fn operations(&self) -> Vec<Arc<dyn Operation>> {
-        let mut ops: Vec<Arc<dyn Operation>> = vec![Arc::new(RenameOp), Arc::new(FindUsagesOp)];
+        let mut ops: Vec<Arc<dyn Operation>> =
+            vec![Arc::new(RenameOp), Arc::new(FindUsagesOp), Arc::new(SymbolSearchOp)];
         ops.extend(CodeActionOp::ts_set());
         ops
     }

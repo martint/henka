@@ -12,7 +12,11 @@ this expression / these statements", "inline this", or "change this signature", 
 it through Henka rather than editing call sites by hand. And **prefer a semantic
 query over text search**: "where is this used?" answered by `find-usages` reflects
 the compiler's view — the right symbol, the right overload — not whatever a string
-match happens to hit in comments and unrelated code.
+match happens to hit in comments and unrelated code. The same goes for locating a
+symbol you only know by name: call `symbol-search` instead of grepping the tree and
+guessing which hit is the declaration — it resolves the name straight to a file and
+range you can hand to `find-usages`, `rename`, or any other position-targeted
+operation.
 
 Operations come in two kinds:
 

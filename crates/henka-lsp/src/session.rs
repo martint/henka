@@ -19,6 +19,7 @@ use tokio::time::Duration;
 
 use crate::LspClient;
 use crate::Result;
+use crate::convert;
 
 /// Upper bound on source files opened to index a project.
 const MAX_INDEX_FILES: usize = 2000;
@@ -348,6 +349,19 @@ impl LspSession {
         }
         self.drain_until_reconciled(&mut events, pending).await;
         self.overlay_dirty.store(false, Ordering::Release);
+    }
+
+    /// Run `workspace/symbol` for `query`, ensuring the index is warm first,
+    /// and normalize the response. Shared by every LSP-backed provider's
+    /// `symbol-search` operation, since the request and its response shape
+    /// don't vary by language.
+    pub async fn symbol_search(&self, query: &str, limit: usize) -> Result<Value> {
+        self.ensure_indexed().await?;
+        let result: Value = self
+            .client
+            .request("workspace/symbol", json!({ "query": query }))
+            .await?;
+        convert::symbols_to_query(result, &self.root, limit)
     }
 
     /// Shut the server down.

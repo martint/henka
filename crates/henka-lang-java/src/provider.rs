@@ -16,7 +16,9 @@ use tokio::sync::Mutex;
 
 use crate::error::JavaError;
 use crate::jdtls::{JdtlsInstall, JdtlsSession, index_base};
-use crate::operations::{ChangeSignatureOp, CodeActionOp, FindUsagesOp, MoveOp, RenameOp};
+use crate::operations::{
+    ChangeSignatureOp, CodeActionOp, FindUsagesOp, MoveOp, RenameOp, SymbolSearchOp,
+};
 
 #[async_trait]
 impl LanguageSession for JdtlsSession {
@@ -97,6 +99,7 @@ impl LanguageProvider for JavaProvider {
         let mut ops: Vec<Arc<dyn Operation>> = vec![
             Arc::new(RenameOp),
             Arc::new(FindUsagesOp),
+            Arc::new(SymbolSearchOp),
             Arc::new(ChangeSignatureOp),
             Arc::new(MoveOp),
         ];

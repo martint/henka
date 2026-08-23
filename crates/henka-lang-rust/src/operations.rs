@@ -275,6 +275,60 @@ impl Operation for CodeActionOp {
     }
 }
 
+/// Search for symbols across the project by name query.
+pub struct SymbolSearchOp;
+
+#[async_trait]
+impl Operation for SymbolSearchOp {
+    fn descriptor(&self) -> OperationDescriptor {
+        OperationDescriptor {
+            id: "symbol-search".into(),
+            title: "Symbol search".into(),
+            description: "Search for symbols across the project by name query.".into(),
+            kind: OperationKind::Query,
+            languages: vec![Language::Rust],
+            target: TargetKind::Project,
+            params_schema: json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Partial or full symbol name to search for."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of symbols to return.",
+                        "default": henka_lsp::DEFAULT_SYMBOL_SEARCH_LIMIT
+                    }
+                }
+            }),
+        }
+    }
+
+    async fn run(
+        &self,
+        ctx: &OperationCtx<'_>,
+        req: &OperationRequest,
+    ) -> CoreResult<OperationOutcome> {
+        let session = ra(ctx)?;
+        let query = req
+            .params
+            .get("query")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CoreError::InvalidTarget("`query` is required".into()))?;
+        let limit = req
+            .params
+            .get("limit")
+            .and_then(Value::as_u64)
+            .map(|v| v as usize)
+            .unwrap_or(henka_lsp::DEFAULT_SYMBOL_SEARCH_LIMIT);
+
+        let out = session.symbol_search(query, limit).await.map_err(backend)?;
+        Ok(OperationOutcome::Query(out))
+    }
+}
+
 /// Find every reference to the symbol at a position.
 pub struct FindUsagesOp;
 
