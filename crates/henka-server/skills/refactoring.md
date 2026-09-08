@@ -18,6 +18,12 @@ guessing which hit is the declaration — it resolves the name straight to a fil
 range you can hand to `find-usages`, `rename`, or any other position-targeted
 operation.
 
+**Query results quote the code they point at.** Every location a query returns carries
+`text`, the source line at that coordinate, so you can usually pick the hit you meant —
+or confirm a rename covered what you expected — without opening a single file. Pass
+`context_lines` only when the surrounding lines genuinely matter; the line itself is
+already there.
+
 Operations come in two kinds:
 
 - **Edits** — refactorings (rename, extract, inline, organize-imports) and structural

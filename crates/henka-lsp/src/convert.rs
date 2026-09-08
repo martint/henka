@@ -5,8 +5,11 @@
 //! These helpers convert those into the core [`WorkspaceEdit`] and into
 //! structured query results, so every LSP-backed provider shares one mapping.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use henka_core::{
     FileEdit, FileOperation, Position, PositionEncoding, Range, TextEdit, WorkspaceEdit,
@@ -116,6 +119,146 @@ impl From<LspTextEdit> for TextEdit {
     }
 }
 
+/// The most characters of a single source line a result will carry. A minified
+/// or generated file should cost the caller one line's worth of context, not a
+/// screenful.
+const MAX_TEXT_CHARS: usize = 500;
+
+/// The largest window `context_lines` may ask for on either side of a location,
+/// so a wide window and a large `limit` can't combine into an unbounded result.
+pub const MAX_CONTEXT_LINES: usize = 10;
+
+/// Where a result's source text comes from, and how much of it to quote.
+///
+/// A coordinate on its own is not a useful answer to a caller with no editor
+/// open: it has to read the file to see what is there, which is the read these
+/// queries exist to replace. So every location a query reports carries the
+/// source at that location, quoted from `content_root` — the working copy the
+/// query was answered against, which is not the base checkout when a request
+/// overlays a sibling worktree.
+pub struct Source<'a> {
+    /// Root that reported paths are made relative to.
+    root: &'a Path,
+    /// Checkout the quoted text is read from.
+    content_root: PathBuf,
+    /// Extra lines to include on either side of a location.
+    context_lines: usize,
+    /// Files already read, so one response over N hits in a file reads it once.
+    /// `None` marks a file that could not be read, so it isn't retried. Shared
+    /// as an `Arc<str>` so every hit in one file borrows the same content
+    /// instead of copying it.
+    cache: RefCell<HashMap<PathBuf, Option<Arc<str>>>>,
+}
+
+impl<'a> Source<'a> {
+    /// Quote from `content_root`, reporting paths relative to `root`, with
+    /// `context_lines` extra lines around each location (clamped to
+    /// [`MAX_CONTEXT_LINES`]).
+    pub fn new(root: &'a Path, content_root: PathBuf, context_lines: usize) -> Self {
+        Self {
+            root,
+            content_root,
+            context_lines: context_lines.min(MAX_CONTEXT_LINES),
+            cache: RefCell::new(HashMap::new()),
+        }
+    }
+
+    /// A `file://` URI as the path a caller sees: relative to `root` where it
+    /// lies inside it, absolute otherwise.
+    fn rel(&self, uri: &str) -> String {
+        let path = uri_to_path(uri);
+        path.strip_prefix(self.root)
+            .unwrap_or(&path)
+            .display()
+            .to_string()
+    }
+
+    /// Read `uri`'s content from the checkout being quoted, memoized.
+    fn content(&self, uri: &str) -> Option<Arc<str>> {
+        let abs = uri_to_path(uri);
+        // The URI addresses the base index; an overlaid working copy holds the
+        // same relative path under its own root.
+        let read_from = match abs.strip_prefix(self.root) {
+            Ok(rel) => self.content_root.join(rel),
+            Err(_) => abs.clone(),
+        };
+        if let Some(cached) = self.cache.borrow().get(&read_from) {
+            return cached.clone();
+        }
+        let content: Option<Arc<str>> = std::fs::read_to_string(&read_from)
+            .ok()
+            .map(Arc::from);
+        self.cache.borrow_mut().insert(read_from, content.clone());
+        content
+    }
+
+    /// Attach the source at `range` in `uri` to a result entry: `text`, the
+    /// line(s) the range covers, plus `context`/`context_start_line` when a
+    /// window was asked for.
+    ///
+    /// A file that can't be read, or a range past its end, leaves the entry
+    /// without text rather than failing the query or — worse — quoting the
+    /// wrong line: the location is the answer, the text is context for it.
+    fn annotate(&self, entry: &mut Value, uri: &str, range: &LspRange) {
+        let Some(content) = self.content(uri) else {
+            return;
+        };
+        let lines: Vec<&str> = content.lines().collect();
+        let first = range.start.line as usize;
+        // An LSP range end is exclusive: a multiline range that ends at
+        // character 0 stops before that line, so quoting it would add a line
+        // the range doesn't cover.
+        let end = range.end.line as usize;
+        let last = match end > first && range.end.character == 0 {
+            true => end - 1,
+            false => end.max(first),
+        };
+        if first >= lines.len() {
+            return;
+        }
+        let last = last.min(lines.len() - 1);
+
+        entry["text"] = json!(truncate_lines(&lines[first..=last]));
+
+        if self.context_lines > 0 {
+            let from = first.saturating_sub(self.context_lines);
+            let to = (last + self.context_lines).min(lines.len() - 1);
+            entry["context"] = json!(truncate_lines(&lines[from..=to]));
+            entry["context_start_line"] = json!(from);
+        }
+    }
+}
+
+/// Join `lines`, capping each at [`MAX_TEXT_CHARS`] with a trailing ellipsis.
+fn truncate_lines(lines: &[&str]) -> String {
+    lines
+        .iter()
+        .map(|line| {
+            if line.chars().count() <= MAX_TEXT_CHARS {
+                (*line).to_string()
+            } else {
+                let head: String = line.chars().take(MAX_TEXT_CHARS).collect();
+                format!("{head}…")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The `context_lines` parameter every location-bearing query accepts, as a
+/// JSON Schema property. Shared so each operation describes it identically.
+pub fn context_lines_param() -> Value {
+    json!({
+        "type": "integer",
+        "minimum": 0,
+        "maximum": MAX_CONTEXT_LINES,
+        "default": 0,
+        "description": "Extra source lines to include on either side of each result location. \
+                        Each result already carries the line it points at; raise this only when \
+                        the surrounding lines matter."
+    })
+}
+
 /// Convert an LSP `WorkspaceEdit` JSON value into the core model, including any
 /// file-level resource operations (create/rename/delete).
 pub fn to_core_workspace_edit(value: Value) -> Result<WorkspaceEdit> {
@@ -200,30 +343,27 @@ fn resource_op(
     }
 }
 
-/// Convert an LSP `Location[]` response into a structured find-usages result,
-/// with paths expressed relative to `root` where possible.
-pub fn locations_to_query(value: Value, root: &Path) -> Result<Value> {
+/// Convert an LSP `Location[]` response into a structured find-usages result:
+/// paths relative to the project root, ranges flattened, and each usage quoting
+/// the source line it points at.
+pub fn locations_to_query(value: Value, source: &Source<'_>) -> Result<Value> {
     if value.is_null() {
-        return Ok(json!({ "usages": [] }));
+        return Ok(json!({ "count": 0, "usages": [] }));
     }
     let locations: Vec<LspLocation> = serde_json::from_value(value)?;
 
     let usages: Vec<Value> = locations
         .into_iter()
         .map(|loc| {
-            let path = uri_to_path(&loc.uri);
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .display()
-                .to_string();
-            json!({
-                "file": rel,
+            let mut entry = json!({
+                "file": source.rel(&loc.uri),
                 "start_line": loc.range.start.line,
                 "start_character": loc.range.start.character,
                 "end_line": loc.range.end.line,
                 "end_character": loc.range.end.character,
-            })
+            });
+            source.annotate(&mut entry, &loc.uri, &loc.range);
+            entry
         })
         .collect();
 
@@ -236,14 +376,14 @@ pub const DEFAULT_SYMBOL_SEARCH_LIMIT: usize = 200;
 
 /// Convert an LSP `SymbolInformation[]` (or `WorkspaceSymbol[]`) response
 /// from `workspace/symbol` into a structured symbol-search result, with
-/// paths expressed relative to `root` where possible and matches capped at
-/// `limit`.
+/// paths relative to the project root, each match quoting its declaring line,
+/// and matches capped at `limit`.
 ///
 /// `count` always reports the total number matched, even when the returned
 /// `symbols` list is truncated to `limit` — a truncated response also carries
 /// `"truncated": true` so the caller knows to narrow its query rather than
 /// assuming it saw everything.
-pub fn symbols_to_query(value: Value, root: &Path, limit: usize) -> Result<Value> {
+pub fn symbols_to_query(value: Value, source: &Source<'_>, limit: usize) -> Result<Value> {
     if value.is_null() {
         return Ok(json!({ "count": 0, "symbols": [] }));
     }
@@ -257,7 +397,7 @@ pub fn symbols_to_query(value: Value, root: &Path, limit: usize) -> Result<Value
         .collect();
 
     // Count first, cap second, build last: the matches past the cap are never
-    // returned, so nothing should be spent describing them.
+    // returned, and quoting one costs a file read and a scan of its lines.
     let total = matched.len();
     let truncated = total > limit;
 
@@ -265,16 +405,10 @@ pub fn symbols_to_query(value: Value, root: &Path, limit: usize) -> Result<Value
         .into_iter()
         .take(limit)
         .map(|(s, range)| {
-            let path = uri_to_path(&s.location.uri);
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .display()
-                .to_string();
             let mut obj = json!({
                 "name": s.name,
                 "kind": symbol_kind_name(s.kind),
-                "file": rel,
+                "file": source.rel(&s.location.uri),
                 "start_line": range.start.line,
                 "start_character": range.start.character,
                 "end_line": range.end.line,
@@ -283,6 +417,9 @@ pub fn symbols_to_query(value: Value, root: &Path, limit: usize) -> Result<Value
             if let Some(container) = s.container_name {
                 obj["container_name"] = json!(container);
             }
+            // The declaring line is what lets a caller pick between several
+            // same-named matches without opening each file.
+            source.annotate(&mut obj, &s.location.uri, &range);
             obj
         })
         .collect();
@@ -362,6 +499,26 @@ pub fn uri_to_path(uri: &str) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// A source rooted at a path that holds no files, so results carry
+    /// locations but no quoted text.
+    fn at_root(root: &str) -> Source<'_> {
+        Source::new(Path::new(root), PathBuf::from(root), 0)
+    }
+
+    /// Write `content` to `name` under a fresh root, returning both.
+    fn tree(name: &str, content: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(name);
+        std::fs::write(&file, content).unwrap();
+        (dir, file)
+    }
+
+    /// The `file://` URI for a test path.
+    fn path_to_uri(path: &Path) -> String {
+        format!("file://{}", path.display())
+    }
+
+
     #[test]
     fn maps_changes_map() {
         let value = json!({
@@ -432,8 +589,165 @@ mod tests {
     }
 
     #[test]
+    fn usage_quotes_the_line_it_points_at() {
+        let (dir, file) = tree(
+            "auth.ts",
+            "import x;\nfunction f() {\n  return validateToken(token);\n}\n",
+        );
+        let value = json!([{
+            "uri": path_to_uri(&file),
+            "range": {"start": {"line": 2, "character": 9}, "end": {"line": 2, "character": 22}}
+        }]);
+        let source = Source::new(dir.path(), dir.path().to_path_buf(), 0);
+        let out = locations_to_query(value, &source).unwrap();
+        assert_eq!(out["usages"][0]["file"], json!("auth.ts"));
+        assert_eq!(out["usages"][0]["text"], json!("  return validateToken(token);"));
+        // No window was asked for, so none is paid for.
+        assert!(out["usages"][0].get("context").is_none());
+    }
+
+    #[test]
+    fn multiline_range_ending_at_character_zero_stops_at_the_line_before() {
+        let (dir, file) = tree("a.rs", "one\ntwo\nthree\nfour\n");
+        // An end of {line: 2, character: 0} is exclusive: the range covers
+        // lines 1 and 2 of the file, not line 3.
+        let value = json!([{
+            "uri": path_to_uri(&file),
+            "range": {"start": {"line": 1, "character": 0}, "end": {"line": 2, "character": 0}}
+        }]);
+        let source = Source::new(dir.path(), dir.path().to_path_buf(), 1);
+        let out = locations_to_query(value, &source).unwrap();
+        assert_eq!(out["usages"][0]["text"], json!("two"));
+        assert_eq!(out["usages"][0]["context"], json!("one\ntwo\nthree"));
+        assert_eq!(out["usages"][0]["context_start_line"], json!(0));
+    }
+
+    #[test]
+    fn multiline_range_ending_mid_line_includes_that_line() {
+        let (dir, file) = tree("a.rs", "one\ntwo\nthree\nfour\n");
+        let value = json!([{
+            "uri": path_to_uri(&file),
+            "range": {"start": {"line": 1, "character": 0}, "end": {"line": 2, "character": 2}}
+        }]);
+        let source = Source::new(dir.path(), dir.path().to_path_buf(), 0);
+        let out = locations_to_query(value, &source).unwrap();
+        assert_eq!(out["usages"][0]["text"], json!("two\nthree"));
+    }
+
+    #[test]
+    fn context_lines_widen_the_window_and_report_its_start() {
+        let (dir, file) = tree("a.rs", "one\ntwo\nthree\nfour\nfive\n");
+        let value = json!([{
+            "uri": path_to_uri(&file),
+            "range": {"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 5}}
+        }]);
+        let source = Source::new(dir.path(), dir.path().to_path_buf(), 1);
+        let out = locations_to_query(value, &source).unwrap();
+        assert_eq!(out["usages"][0]["text"], json!("three"));
+        assert_eq!(out["usages"][0]["context"], json!("two\nthree\nfour"));
+        assert_eq!(out["usages"][0]["context_start_line"], json!(1));
+    }
+
+    #[test]
+    fn context_window_is_clamped_at_the_file_edges() {
+        let (dir, file) = tree("a.rs", "one\ntwo\n");
+        let value = json!([{
+            "uri": path_to_uri(&file),
+            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}}
+        }]);
+        let source = Source::new(dir.path(), dir.path().to_path_buf(), 5);
+        let out = locations_to_query(value, &source).unwrap();
+        assert_eq!(out["usages"][0]["context"], json!("one\ntwo"));
+        assert_eq!(out["usages"][0]["context_start_line"], json!(0));
+    }
+
+    #[test]
+    fn text_is_read_from_the_overlaid_working_copy() {
+        // The URI addresses the base checkout, but the request was answered
+        // against a sibling working copy whose content differs.
+        let base = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        std::fs::write(base.path().join("a.rs"), "let base = 1;\n").unwrap();
+        std::fs::write(work.path().join("a.rs"), "let overlaid = 1;\n").unwrap();
+        let value = json!([{
+            "uri": path_to_uri(&base.path().join("a.rs")),
+            "range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 12}}
+        }]);
+        let source = Source::new(base.path(), work.path().to_path_buf(), 0);
+        let out = locations_to_query(value, &source).unwrap();
+        assert_eq!(out["usages"][0]["text"], json!("let overlaid = 1;"));
+    }
+
+    #[test]
+    fn unreadable_file_loses_its_text_not_its_place() {
+        let value = json!([{
+            "uri": "file:///proj/gone.rs",
+            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}}
+        }]);
+        let out = locations_to_query(value, &at_root("/proj")).unwrap();
+        assert_eq!(out["count"], json!(1));
+        assert_eq!(out["usages"][0]["file"], json!("gone.rs"));
+        assert!(out["usages"][0].get("text").is_none());
+    }
+
+    #[test]
+    fn range_past_the_end_of_the_file_quotes_nothing() {
+        let (dir, file) = tree("a.rs", "one\n");
+        let value = json!([{
+            "uri": path_to_uri(&file),
+            "range": {"start": {"line": 40, "character": 0}, "end": {"line": 40, "character": 3}}
+        }]);
+        let source = Source::new(dir.path(), dir.path().to_path_buf(), 0);
+        let out = locations_to_query(value, &source).unwrap();
+        assert!(out["usages"][0].get("text").is_none());
+    }
+
+    #[test]
+    fn over_long_line_is_truncated() {
+        let long = "x".repeat(MAX_TEXT_CHARS + 50);
+        let (dir, file) = tree("min.js", &format!("{long}\n"));
+        let value = json!([{
+            "uri": path_to_uri(&file),
+            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}
+        }]);
+        let source = Source::new(dir.path(), dir.path().to_path_buf(), 0);
+        let out = locations_to_query(value, &source).unwrap();
+        let text = out["usages"][0]["text"].as_str().unwrap();
+        assert_eq!(text.chars().count(), MAX_TEXT_CHARS + 1);
+        assert!(text.ends_with('…'));
+    }
+
+    #[test]
+    fn context_lines_are_clamped_to_the_cap() {
+        let source = Source::new(Path::new("/proj"), PathBuf::from("/proj"), 999);
+        assert_eq!(source.context_lines, MAX_CONTEXT_LINES);
+    }
+
+    #[test]
+    fn symbol_quotes_its_declaring_line() {
+        let (dir, file) = tree("Foo.java", "package p;\n\npublic class Foo {\n}\n");
+        let value = json!([{
+            "name": "Foo",
+            "kind": 5,
+            "location": {
+                "uri": path_to_uri(&file),
+                "range": {"start": {"line": 2, "character": 13}, "end": {"line": 2, "character": 16}}
+            }
+        }]);
+        let source = Source::new(dir.path(), dir.path().to_path_buf(), 0);
+        let out = symbols_to_query(value, &source, 10).unwrap();
+        assert_eq!(out["symbols"][0]["text"], json!("public class Foo {"));
+    }
+
+    #[test]
+    fn null_usages_report_a_count() {
+        let out = locations_to_query(Value::Null, &at_root("/proj")).unwrap();
+        assert_eq!(out, json!({ "count": 0, "usages": [] }));
+    }
+
+    #[test]
     fn null_symbol_search_is_empty() {
-        let out = symbols_to_query(Value::Null, Path::new("/proj"), 10).unwrap();
+        let out = symbols_to_query(Value::Null, &at_root("/proj"), 10).unwrap();
         assert_eq!(out, json!({ "count": 0, "symbols": [] }));
     }
 
@@ -447,7 +761,7 @@ mod tests {
                 "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 3}}
             }
         }]);
-        let out = symbols_to_query(value, Path::new("/proj"), 10).unwrap();
+        let out = symbols_to_query(value, &at_root("/proj"), 10).unwrap();
         assert_eq!(out["symbols"][0]["file"], json!("src/Foo.java"));
         assert_eq!(out["symbols"][0]["kind"], json!("class"));
     }
@@ -462,7 +776,7 @@ mod tests {
                 "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}}
             }
         }]);
-        let out = symbols_to_query(value, Path::new("/proj"), 10).unwrap();
+        let out = symbols_to_query(value, &at_root("/proj"), 10).unwrap();
         assert_eq!(out["symbols"][0]["file"], json!("/other/Foo.java"));
     }
 
@@ -487,7 +801,7 @@ mod tests {
                 }
             }
         ]);
-        let out = symbols_to_query(value, Path::new("/proj"), 10).unwrap();
+        let out = symbols_to_query(value, &at_root("/proj"), 10).unwrap();
         assert_eq!(out["symbols"][0]["container_name"], json!("Foo"));
         assert!(out["symbols"][1].get("container_name").is_none());
     }
@@ -509,9 +823,39 @@ mod tests {
                 }
             }
         ]);
-        let out = symbols_to_query(value, Path::new("/proj"), 10).unwrap();
+        let out = symbols_to_query(value, &at_root("/proj"), 10).unwrap();
         assert_eq!(out["count"], json!(1));
         assert_eq!(out["symbols"][0]["name"], json!("Resolved"));
+    }
+
+    #[test]
+    fn symbol_search_quotes_only_the_matches_it_returns() {
+        // Quoting a match reads its file and scans it; a broad search that
+        // returns two of two thousand matches must pay that for two, so the
+        // source cache must hold only the files behind the returned symbols.
+        let dir = tempfile::tempdir().unwrap();
+        let matches: Vec<Value> = (0..5)
+            .map(|i| {
+                let file = dir.path().join(format!("Foo{i}.java"));
+                std::fs::write(&file, format!("class Foo{i} {{}}\n")).unwrap();
+                json!({
+                    "name": format!("Foo{i}"),
+                    "kind": 5,
+                    "location": {
+                        "uri": path_to_uri(&file),
+                        "range": {"start": {"line": 0, "character": 6}, "end": {"line": 0, "character": 10}}
+                    }
+                })
+            })
+            .collect();
+        let source = Source::new(dir.path(), dir.path().to_path_buf(), 0);
+
+        let out = symbols_to_query(json!(matches), &source, 2).unwrap();
+
+        assert_eq!(out["count"], json!(5));
+        assert_eq!(out["symbols"][0]["text"], json!("class Foo0 {}"));
+        assert_eq!(out["symbols"][1]["text"], json!("class Foo1 {}"));
+        assert_eq!(source.cache.borrow().len(), 2, "only the returned matches are read");
     }
 
     #[test]
@@ -528,7 +872,7 @@ mod tests {
                 })
             })
             .collect();
-        let out = symbols_to_query(json!(matches), Path::new("/proj"), 2).unwrap();
+        let out = symbols_to_query(json!(matches), &at_root("/proj"), 2).unwrap();
         assert_eq!(out["count"], json!(5));
         assert_eq!(out["symbols"].as_array().unwrap().len(), 2);
         assert_eq!(out["truncated"], json!(true));

@@ -102,6 +102,12 @@ impl RaSession {
         self.session.root()
     }
 
+    /// The checkout results should quote their source from — the working copy
+    /// of an active overlay, else the project root.
+    pub fn content_root(&self) -> PathBuf {
+        self.session.content_root()
+    }
+
     /// Open a document if it isn't already, returning its URI.
     pub async fn ensure_open(&self, path: &Path) -> Result<String> {
         Ok(self.session.ensure_open(path).await?)
@@ -112,9 +118,18 @@ impl RaSession {
         Ok(self.session.ensure_indexed().await?)
     }
 
-    /// Search the project for symbols matching `query`, capped at `limit`.
-    pub async fn symbol_search(&self, query: &str, limit: usize) -> Result<Value> {
-        Ok(self.session.symbol_search(query, limit).await?)
+    /// Search the project for symbols matching `query`, capped at `limit`,
+    /// quoting each match's declaring line with `context_lines` extra lines.
+    pub async fn symbol_search(
+        &self,
+        query: &str,
+        limit: usize,
+        context_lines: usize,
+    ) -> Result<Value> {
+        Ok(self
+            .session
+            .symbol_search(query, limit, context_lines)
+            .await?)
     }
 
     /// Sync files changed on disk back into the server.

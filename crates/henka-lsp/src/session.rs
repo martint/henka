@@ -10,6 +10,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use henka_core::provider::RequestGuard;
@@ -65,6 +66,10 @@ pub struct LspSession {
     /// Set while an overlay is active, so a leaked overlay (a request that did
     /// not restore) is cleared at the start of the next request.
     overlay_dirty: AtomicBool,
+    /// The working copy the active overlay presents, if any. Recorded so a
+    /// result can quote source from the content the request was answered
+    /// against rather than from the base checkout.
+    overlay_root: StdMutex<Option<PathBuf>>,
     /// Monotonic version counter for `didChange` notifications.
     doc_version: AtomicU32,
 }
@@ -86,6 +91,7 @@ impl LspSession {
             request: Arc::new(Mutex::new(())),
             overlay: Mutex::new(OverlayState::default()),
             overlay_dirty: AtomicBool::new(false),
+            overlay_root: StdMutex::new(None),
             doc_version: AtomicU32::new(1),
         }
     }
@@ -98,6 +104,18 @@ impl LspSession {
     /// The project root.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The checkout whose content this session is currently answering from: the
+    /// working copy of an active overlay, else the base root. Source quoted in a
+    /// result must be read from here, so the text beside a coordinate is the text
+    /// the coordinate was resolved against.
+    pub fn content_root(&self) -> PathBuf {
+        self.overlay_root
+            .lock()
+            .ok()
+            .and_then(|r| r.clone())
+            .unwrap_or_else(|| self.root.clone())
     }
 
     /// The `file://` URI for a path, resolved against the project root.
@@ -318,6 +336,9 @@ impl LspSession {
                 self.overlay.lock().await.opened.insert(base_abs);
             }
             self.overlay_dirty.store(true, Ordering::Release);
+            if let Ok(mut root) = self.overlay_root.lock() {
+                *root = Some(workspace_root.to_path_buf());
+            }
             pending.insert(uri);
         }
         self.drain_until_reconciled(&mut events, pending).await;
@@ -328,6 +349,9 @@ impl LspSession {
     /// content, close any opened solely for the overlay, and clear the record.
     /// Idempotent — safe to call to clear a leaked overlay.
     pub async fn restore_overlay(&self) {
+        if let Ok(mut root) = self.overlay_root.lock() {
+            *root = None;
+        }
         let state = std::mem::take(&mut *self.overlay.lock().await);
         if state.changed.is_empty() && state.opened.is_empty() {
             self.overlay_dirty.store(false, Ordering::Release);
@@ -355,13 +379,19 @@ impl LspSession {
     /// and normalize the response. Shared by every LSP-backed provider's
     /// `symbol-search` operation, since the request and its response shape
     /// don't vary by language.
-    pub async fn symbol_search(&self, query: &str, limit: usize) -> Result<Value> {
+    pub async fn symbol_search(
+        &self,
+        query: &str,
+        limit: usize,
+        context_lines: usize,
+    ) -> Result<Value> {
         self.ensure_indexed().await?;
         let result: Value = self
             .client
             .request("workspace/symbol", json!({ "query": query }))
             .await?;
-        convert::symbols_to_query(result, &self.root, limit)
+        let source = convert::Source::new(&self.root, self.content_root(), context_lines);
+        convert::symbols_to_query(result, &source, limit)
     }
 
     /// Shut the server down.

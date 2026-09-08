@@ -32,6 +32,26 @@ fn position_target(req: &OperationRequest) -> CoreResult<(&PathBuf, Position)> {
     }
 }
 
+/// The extra lines of context a request asked for around each result location.
+fn context_lines(req: &OperationRequest) -> usize {
+    req.params
+        .get("context_lines")
+        .and_then(Value::as_u64)
+        .map(|n| n as usize)
+        .unwrap_or(0)
+}
+
+/// Where a query's results quote their source from: the working copy the
+/// request is being answered against, with paths reported relative to the
+/// project root.
+fn source<'a>(session: &'a JdtlsSession, req: &OperationRequest) -> lsp::Source<'a> {
+    lsp::Source::new(
+        session.root(),
+        session.content_root(),
+        context_lines(req),
+    )
+}
+
 /// Map a backend error into the core error type.
 fn backend(e: impl std::fmt::Display) -> CoreError {
     CoreError::Backend(e.to_string())
@@ -633,6 +653,7 @@ impl Operation for SymbolSearchOp {
                         "type": "string",
                         "description": "Partial or full symbol name to search for."
                     },
+                    "context_lines": lsp::context_lines_param(),
                     "limit": {
                         "type": "integer",
                         "description": "Maximum number of symbols to return.",
@@ -661,7 +682,10 @@ impl Operation for SymbolSearchOp {
             .map(|v| v as usize)
             .unwrap_or(lsp::DEFAULT_SYMBOL_SEARCH_LIMIT);
 
-        let out = session.symbol_search(query, limit).await.map_err(backend)?;
+        let out = session
+            .symbol_search(query, limit, context_lines(req))
+            .await
+            .map_err(backend)?;
         Ok(OperationOutcome::Query(out))
     }
 }
@@ -686,7 +710,8 @@ impl Operation for FindUsagesOp {
                         "type": "boolean",
                         "default": true,
                         "description": "Whether to include the symbol's own declaration."
-                    }
+                    },
+                    "context_lines": lsp::context_lines_param()
                 }
             }),
         }
@@ -720,7 +745,7 @@ impl Operation for FindUsagesOp {
             .await
             .map_err(backend)?;
 
-        let usages = lsp::locations_to_query(result, session.root()).map_err(backend)?;
+        let usages = lsp::locations_to_query(result, &source(session, req)).map_err(backend)?;
         Ok(OperationOutcome::Query(usages))
     }
 }

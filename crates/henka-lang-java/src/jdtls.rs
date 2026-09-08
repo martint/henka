@@ -229,6 +229,12 @@ impl JdtlsSession {
         self.session.root()
     }
 
+    /// The checkout results should quote their source from — the working copy
+    /// of an active overlay, else the project root.
+    pub fn content_root(&self) -> PathBuf {
+        self.session.content_root()
+    }
+
     /// The `file://` URI for a path, resolved against the project root.
     pub fn uri_for(&self, path: &Path) -> String {
         self.session.uri_for(path)
@@ -244,9 +250,18 @@ impl JdtlsSession {
         Ok(self.session.ensure_indexed().await?)
     }
 
-    /// Search the project for symbols matching `query`, capped at `limit`.
-    pub async fn symbol_search(&self, query: &str, limit: usize) -> Result<Value> {
-        Ok(self.session.symbol_search(query, limit).await?)
+    /// Search the project for symbols matching `query`, capped at `limit`,
+    /// quoting each match's declaring line with `context_lines` extra lines.
+    pub async fn symbol_search(
+        &self,
+        query: &str,
+        limit: usize,
+        context_lines: usize,
+    ) -> Result<Value> {
+        Ok(self
+            .session
+            .symbol_search(query, limit, context_lines)
+            .await?)
     }
 
     /// Open the given files and wait for the server to reconcile them.
