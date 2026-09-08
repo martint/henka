@@ -330,6 +330,7 @@ async fn initialize(client: &LspClient, root: &Path, bundles: &[String]) -> Resu
                 "synchronization": { "didSave": true, "dynamicRegistration": true },
                 "rename": { "dynamicRegistration": true, "prepareSupport": true },
                 "references": { "dynamicRegistration": true },
+                "hover": { "dynamicRegistration": true, "contentFormat": ["markdown", "plaintext"] },
                 "definition": { "dynamicRegistration": true },
                 "implementation": { "dynamicRegistration": true },
                 "documentSymbol": { "dynamicRegistration": true, "hierarchicalDocumentSymbolSupport": true },

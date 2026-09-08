@@ -10,7 +10,7 @@ pub mod session;
 pub use client::LspClient;
 pub use convert::{
     DEFAULT_SYMBOL_SEARCH_LIMIT, MAX_CONTEXT_LINES, Source, context_lines_param, goto_to_query,
-    locations_to_query, symbols_to_query, to_core_workspace_edit, uri_to_path,
+    hover_to_query, locations_to_query, symbols_to_query, to_core_workspace_edit, uri_to_path,
 };
 pub use error::{LspError, Result};
 pub use session::{LspSession, path_to_file_uri};

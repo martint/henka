@@ -18,6 +18,11 @@ guessing which hit is the declaration — it resolves the name straight to a fil
 range you can hand to `find-usages`, `rename`, or any other position-targeted
 operation.
 
+**Ask what a symbol is rather than reading for it.** `describe-symbol` returns the
+resolved type, the selected overload's signature, and the documentation — including for
+a dependency whose source isn't in the tree — where reading the declaration would cost a
+file and still leave generics unresolved.
+
 **Query results quote the code they point at.** Every location a query returns carries
 `text`, the source line at that coordinate, so you can usually pick the hit you meant —
 or confirm a rename covered what you expected — without opening a single file. Pass
@@ -29,7 +34,7 @@ Operations come in two kinds:
 - **Edits** — refactorings (rename, extract, inline, organize-imports) and structural
   search-and-replace. These change code and support a preview.
 - **Queries** — read-only semantic navigation: find-usages, go-to-definition,
-  find-implementations, call/type hierarchy, symbol search.
+  find-implementations, describe-symbol, call/type hierarchy, symbol search.
 
 ## 1. Find or register the project
 

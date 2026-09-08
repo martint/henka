@@ -104,6 +104,34 @@ enum LspGotoResponse {
     One(LspGotoTarget),
 }
 
+/// A `textDocument/hover` response body. LSP has accumulated three content
+/// shapes here — a `MarkupContent`, a bare or language-tagged `MarkedString`,
+/// or an array of those — and servers in use still send each of them, so all
+/// three are accepted and collapsed into one markdown string.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LspHoverContents {
+    // Ordered before `Markup`: a `MarkedString` object carries both `language`
+    // and `value`, so it would otherwise match `Markup`'s optional `kind` and
+    // lose its fence.
+    Fenced {
+        language: String,
+        value: String,
+    },
+    Markup {
+        value: String,
+    },
+    Plain(String),
+    Many(Vec<LspHoverContents>),
+}
+
+#[derive(Debug, Deserialize)]
+struct LspHover {
+    contents: LspHoverContents,
+    #[serde(default)]
+    range: Option<LspRange>,
+}
+
 /// A `workspace/symbol` match's location. LSP 3.17 allows a `WorkspaceSymbol`
 /// to report just a `uri`, leaving `range` for a later `workspaceSymbol/resolve`
 /// call; Henka doesn't advertise that capability, so such a symbol is dropped
@@ -436,6 +464,45 @@ pub fn goto_to_query(value: Value, source: &Source<'_>, key: &str) -> Result<Val
     Ok(json!({ "count": items.len(), key: items }))
 }
 
+/// Convert a `textDocument/hover` response into a structured description of the
+/// symbol: its resolved type or signature and whatever documentation the server
+/// has, as one markdown string, plus the range it describes.
+///
+/// The result carries no quoted source line, unlike the location-bearing
+/// queries: it is already source-derived prose, and a line of code beside it
+/// would be redundant.
+pub fn hover_to_query(value: Value) -> Result<Value> {
+    if value.is_null() {
+        return Ok(json!({ "text": "" }));
+    }
+    let hover: LspHover = serde_json::from_value(value)?;
+    let mut out = json!({ "text": hover_text(&hover.contents) });
+    if let Some(range) = hover.range {
+        out["start_line"] = json!(range.start.line);
+        out["start_character"] = json!(range.start.character);
+        out["end_line"] = json!(range.end.line);
+        out["end_character"] = json!(range.end.character);
+    }
+    Ok(out)
+}
+
+/// Render hover contents as markdown, fencing the language-tagged form so a
+/// signature still reads as code.
+fn hover_text(contents: &LspHoverContents) -> String {
+    match contents {
+        LspHoverContents::Markup { value, .. } | LspHoverContents::Plain(value) => value.clone(),
+        LspHoverContents::Fenced { language, value } => {
+            format!("```{language}\n{value}\n```")
+        }
+        LspHoverContents::Many(parts) => parts
+            .iter()
+            .map(hover_text)
+            .filter(|part| !part.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    }
+}
+
 /// The default cap on the number of symbols `symbols_to_query` returns when
 /// the caller doesn't specify a `limit`.
 pub const DEFAULT_SYMBOL_SEARCH_LIMIT: usize = 200;
@@ -652,6 +719,54 @@ mod tests {
             uri_to_path("file:///a/b%20c/D.java"),
             PathBuf::from("/a/b c/D.java")
         );
+    }
+
+    #[test]
+    fn hover_reads_markup_content() {
+        let value = json!({
+            "contents": { "kind": "markdown", "value": "`fn foo() -> u32`\n\nDoes a thing." },
+            "range": {"start": {"line": 4, "character": 3}, "end": {"line": 4, "character": 6}}
+        });
+        let out = hover_to_query(value).unwrap();
+        assert_eq!(out["text"], json!("`fn foo() -> u32`\n\nDoes a thing."));
+        assert_eq!(out["start_line"], json!(4));
+        assert_eq!(out["end_character"], json!(6));
+    }
+
+    #[test]
+    fn hover_fences_a_language_tagged_string() {
+        let value = json!({ "contents": { "language": "java", "value": "String name" } });
+        let out = hover_to_query(value).unwrap();
+        assert_eq!(out["text"], json!("```java\nString name\n```"));
+    }
+
+    #[test]
+    fn hover_joins_a_list_of_parts_and_drops_empties() {
+        let value = json!({ "contents": [
+            { "language": "ts", "value": "const x: number" },
+            "",
+            "The count of things."
+        ]});
+        let out = hover_to_query(value).unwrap();
+        assert_eq!(
+            out["text"],
+            json!("```ts\nconst x: number\n```\n\nThe count of things.")
+        );
+    }
+
+    #[test]
+    fn hover_accepts_a_bare_string() {
+        let out = hover_to_query(json!({ "contents": "plain words" })).unwrap();
+        assert_eq!(out["text"], json!("plain words"));
+    }
+
+    #[test]
+    fn hover_with_nothing_to_say_is_empty_not_an_error() {
+        let out = hover_to_query(Value::Null).unwrap();
+        assert_eq!(out, json!({ "text": "" }));
+        // No range means no coordinates, not a malformed result.
+        let out = hover_to_query(json!({ "contents": "x" })).unwrap();
+        assert!(out.get("start_line").is_none());
     }
 
     #[test]

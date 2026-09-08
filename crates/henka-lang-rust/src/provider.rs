@@ -16,7 +16,9 @@ use tokio::sync::Mutex;
 
 use crate::analyzer::{RaSession, locate};
 use crate::error::RustError;
-use crate::operations::{CodeActionOp, FindUsagesOp, GotoQueryOp, RenameOp, SymbolSearchOp};
+use crate::operations::{
+    CodeActionOp, DescribeSymbolOp, FindUsagesOp, GotoQueryOp, RenameOp, SymbolSearchOp,
+};
 
 #[async_trait]
 impl LanguageSession for RaSession {
@@ -98,6 +100,7 @@ impl LanguageProvider for RustProvider {
                 Arc::new(SymbolSearchOp),
                 Arc::new(GotoQueryOp::definition()),
             Arc::new(GotoQueryOp::implementations()),
+            Arc::new(DescribeSymbolOp),
             ];
         ops.extend(CodeActionOp::rust_set());
         ops

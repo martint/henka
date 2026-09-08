@@ -15,7 +15,9 @@ use henka_core::{Error as CoreError, Language, Project, Result as CoreResult, re
 use tokio::sync::Mutex;
 
 use crate::error::TsError;
-use crate::operations::{CodeActionOp, FindUsagesOp, GotoQueryOp, RenameOp, SymbolSearchOp};
+use crate::operations::{
+    CodeActionOp, DescribeSymbolOp, FindUsagesOp, GotoQueryOp, RenameOp, SymbolSearchOp,
+};
 use crate::server::{TsSession, locate};
 
 /// The languages this backend serves; register the provider for all of them.
@@ -101,6 +103,7 @@ impl LanguageProvider for TsProvider {
                 Arc::new(SymbolSearchOp),
                 Arc::new(GotoQueryOp::definition()),
             Arc::new(GotoQueryOp::implementations()),
+            Arc::new(DescribeSymbolOp),
             ];
         ops.extend(CodeActionOp::ts_set());
         ops

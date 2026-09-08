@@ -441,6 +441,53 @@ impl Operation for GotoQueryOp {
     }
 }
 
+/// Describe the symbol at a position: its resolved type or signature and its
+/// documentation.
+pub struct DescribeSymbolOp;
+
+#[async_trait]
+impl Operation for DescribeSymbolOp {
+    fn descriptor(&self) -> OperationDescriptor {
+        OperationDescriptor {
+            id: "describe-symbol".into(),
+            title: "Describe symbol".into(),
+            description: "Report the type, signature, and documentation of the symbol at the \
+                          given position"
+                .into(),
+            kind: OperationKind::Query,
+            languages: vec![Language::Rust],
+            target: TargetKind::Position,
+            params_schema: json!({ "type": "object", "properties": {} }),
+        }
+    }
+
+    async fn run(
+        &self,
+        ctx: &OperationCtx<'_>,
+        req: &OperationRequest,
+    ) -> CoreResult<OperationOutcome> {
+        let session = ra(ctx)?;
+        let (file, position) = position_target(req)?;
+
+        session.ensure_indexed().await.map_err(backend)?;
+        let uri = session.ensure_open(file).await.map_err(backend)?;
+        let result: Value = session
+            .client()
+            .request(
+                "textDocument/hover",
+                json!({
+                    "textDocument": { "uri": uri },
+                    "position": { "line": position.line, "character": position.character },
+                }),
+            )
+            .await
+            .map_err(backend)?;
+
+        let out = henka_lsp::hover_to_query(result).map_err(backend)?;
+        Ok(OperationOutcome::Query(out))
+    }
+}
+
 /// Find every reference to the symbol at a position.
 pub struct FindUsagesOp;
 
