@@ -650,6 +650,17 @@ pub fn incoming_calls_to_query(value: Value, source: &Source<'_>) -> Result<Valu
     calls_to_query(value, source, "from", None)
 }
 
+/// Convert a `callHierarchy/outgoingCalls` response into what the queried item
+/// calls: each callee as a normalized item, paired with the call sites — which
+/// live in the *queried* item's file, `called_from`, not in the callee's.
+pub fn outgoing_calls_to_query(
+    value: Value,
+    source: &Source<'_>,
+    called_from: &str,
+) -> Result<Value> {
+    calls_to_query(value, source, "to", Some(called_from))
+}
+
 /// Shared shape behind the two call-hierarchy directions. `direction` is the
 /// field naming the other end of the call — kept as `from`/`to` rather than
 /// normalized to one neutral name, because a caller and a callee are not
@@ -961,6 +972,53 @@ mod tests {
             uri_to_path("file:///a/b%20c/D.java"),
             PathBuf::from("/a/b c/D.java")
         );
+    }
+
+    #[test]
+    fn outgoing_calls_quote_call_sites_in_the_queried_file() {
+        // The call sites are in the file we asked about, not in the callee's.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Caller.java"),
+            "class Caller {\n  void go() {\n    target(1);\n  }\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("Target.java"),
+            "class Target {\n  void target(int n) {}\n}\n",
+        )
+        .unwrap();
+        let caller_uri = path_to_uri(&dir.path().join("Caller.java"));
+        let target_uri = path_to_uri(&dir.path().join("Target.java"));
+
+        let value = json!([{
+            "to": {
+                "name": "target",
+                "kind": 6,
+                "uri": target_uri,
+                "range": {"start": {"line": 1, "character": 2}, "end": {"line": 1, "character": 24}},
+                "selectionRange": {"start": {"line": 1, "character": 7}, "end": {"line": 1, "character": 13}}
+            },
+            "fromRanges": [
+                {"start": {"line": 2, "character": 4}, "end": {"line": 2, "character": 10}}
+            ]
+        }]);
+        let source = Source::new(dir.path(), dir.path().to_path_buf(), 0);
+        let out = outgoing_calls_to_query(value, &source, &caller_uri).unwrap();
+
+        let call = &out["calls"][0];
+        // The callee is quoted from its own declaration...
+        assert_eq!(call["to"]["file"], json!("Target.java"));
+        assert_eq!(call["to"]["text"], json!("  void target(int n) {}"));
+        // ...while the call site is quoted from the file we asked about.
+        assert_eq!(call["ranges"][0]["file"], json!("Caller.java"));
+        assert_eq!(call["ranges"][0]["text"], json!("    target(1);"));
+    }
+
+    #[test]
+    fn a_method_that_calls_nothing_is_an_empty_result() {
+        let out = outgoing_calls_to_query(Value::Null, &at_root("/proj"), "file:///proj/a.rs").unwrap();
+        assert_eq!(out, json!({ "count": 0, "calls": [] }));
     }
 
     #[test]

@@ -509,6 +509,58 @@ impl Operation for IncomingCallsOp {
 
 }
 
+/// Find what a call hierarchy item calls.
+pub struct OutgoingCallsOp;
+
+#[async_trait]
+impl Operation for OutgoingCallsOp {
+    fn descriptor(&self) -> OperationDescriptor {
+        OperationDescriptor {
+            id: "outgoing-calls".into(),
+            title: "Outgoing calls".into(),
+            description: "Find what a call hierarchy item calls, with the call sites inside it"
+                .into(),
+            kind: OperationKind::Query,
+            languages: languages(),
+            target: TargetKind::Project,
+            params_schema: json!({
+                "type": "object",
+                "required": ["item"],
+                "properties": {
+                    "item": call_hierarchy_item_param(),
+                    "context_lines": henka_lsp::context_lines_param()
+                }
+            }),
+        }
+    }
+
+    async fn run(
+        &self,
+        ctx: &OperationCtx<'_>,
+        req: &OperationRequest,
+    ) -> CoreResult<OperationOutcome> {
+        let session = ts(ctx)?;
+        let item = call_hierarchy_item(req)?;
+
+        prepare_for_call_query(session, item).await?;
+        let result: Value = session
+            .client()
+            .request("callHierarchy/outgoingCalls", json!({ "item": item }))
+            .await
+            .map_err(backend)?;
+
+        // Outgoing call sites are written in the queried item's own file.
+        let called_from = item.get("uri").and_then(Value::as_str).unwrap_or_default();
+        let out = henka_lsp::outgoing_calls_to_query(result, &source(session, req), called_from)
+            .map_err(backend)?;
+        Ok(OperationOutcome::Query(out))
+    }
+    fn route(&self, params: &Value) -> LanguageRoute {
+        henka_lsp::call_hierarchy_item_route(params)
+    }
+
+}
+
 /// Find every reference to the symbol at a position.
 pub struct FindUsagesOp;
 

@@ -27,6 +27,12 @@ resolved type, the selected overload's signature, and the documentation — incl
 a dependency whose source isn't in the tree — where reading the declaration would cost a
 file and still leave generics unresolved.
 
+**Walk a call hierarchy in two steps.** `prepare-call-hierarchy` turns a position into
+items; pass an item's `item` field back — unchanged, it is the server's own handle — to
+`incoming-calls` ("who calls this?") or `outgoing-calls` ("what does this call?"). Each
+result carries handles of its own, so you can keep walking without re-resolving a
+position, and the call sites come with the lines they are written on.
+
 **Query results quote the code they point at.** Every location a query returns carries
 `text`, the source line at that coordinate, so you can usually pick the hit you meant —
 or confirm a rename covered what you expected — without opening a single file. Pass
@@ -38,8 +44,7 @@ Operations come in two kinds:
 - **Edits** — refactorings (rename, extract, inline, organize-imports) and structural
   search-and-replace. These change code and support a preview.
 - **Queries** — read-only semantic navigation: find-usages, go-to-definition,
-  find-implementations, describe-symbol, file-outline, call/type hierarchy, symbol
-  search.
+  find-implementations, describe-symbol, file-outline, call hierarchy, symbol search.
 
 ## 1. Find or register the project
 

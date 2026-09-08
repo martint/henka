@@ -18,7 +18,7 @@ use crate::analyzer::{RaSession, locate};
 use crate::error::RustError;
 use crate::operations::{
     CodeActionOp, DescribeSymbolOp, FileOutlineOp, FindUsagesOp, GotoQueryOp, IncomingCallsOp,
-    PrepareCallHierarchyOp,
+    OutgoingCallsOp, PrepareCallHierarchyOp,
     RenameOp, SymbolSearchOp,
 };
 
@@ -106,6 +106,7 @@ impl LanguageProvider for RustProvider {
             Arc::new(FileOutlineOp),
             Arc::new(PrepareCallHierarchyOp),
             Arc::new(IncomingCallsOp),
+            Arc::new(OutgoingCallsOp),
             ];
         ops.extend(CodeActionOp::rust_set());
         ops

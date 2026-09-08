@@ -13,6 +13,7 @@ pub use convert::{
     call_hierarchy_items_to_query,
     context_lines_param,
     document_symbols_to_query, goto_to_query, incoming_calls_to_query,
+    outgoing_calls_to_query,
     hover_to_query, locations_to_query, symbols_to_query, to_core_workspace_edit, uri_to_path,
 };
 pub use error::{LspError, Result};
