@@ -100,6 +100,7 @@ impl LanguageProvider for TsProvider {
                 Arc::new(FindUsagesOp),
                 Arc::new(SymbolSearchOp),
                 Arc::new(GotoQueryOp::definition()),
+            Arc::new(GotoQueryOp::implementations()),
             ];
         ops.extend(CodeActionOp::ts_set());
         ops

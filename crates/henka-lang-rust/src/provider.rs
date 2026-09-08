@@ -97,6 +97,7 @@ impl LanguageProvider for RustProvider {
                 Arc::new(FindUsagesOp),
                 Arc::new(SymbolSearchOp),
                 Arc::new(GotoQueryOp::definition()),
+            Arc::new(GotoQueryOp::implementations()),
             ];
         ops.extend(CodeActionOp::rust_set());
         ops

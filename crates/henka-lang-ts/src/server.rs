@@ -192,6 +192,7 @@ async fn initialize(client: &LspClient, root: &Path) -> Result<()> {
                 "rename": { "dynamicRegistration": true, "prepareSupport": true },
                 "references": { "dynamicRegistration": true },
                 "definition": { "dynamicRegistration": true },
+                "implementation": { "dynamicRegistration": true },
                 "codeAction": {
                     "dynamicRegistration": true,
                     "codeActionLiteralSupport": {

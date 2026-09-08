@@ -101,6 +101,7 @@ impl LanguageProvider for JavaProvider {
             Arc::new(FindUsagesOp),
             Arc::new(SymbolSearchOp),
             Arc::new(GotoQueryOp::definition()),
+            Arc::new(GotoQueryOp::implementations()),
             Arc::new(ChangeSignatureOp),
             Arc::new(MoveOp),
         ];

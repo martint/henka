@@ -715,6 +715,20 @@ impl GotoQueryOp {
             result_key: "definitions",
         }
     }
+
+    /// From an interface, abstract method, or trait member, resolve the
+    /// concrete implementations. Not a special case of find-usages: a call to
+    /// a method and an override of it are different questions, and only the
+    /// override says where the behavior lives.
+    pub fn implementations() -> Self {
+        Self {
+            id: "find-implementations",
+            title: "Find implementations",
+            description: "Find the concrete implementations of the symbol at the given position",
+            method: "textDocument/implementation",
+            result_key: "implementations",
+        }
+    }
 }
 
 #[async_trait]
@@ -870,6 +884,14 @@ mod tests {
         assert_eq!(d.target, TargetKind::Position);
         // Source context is offered on every location-bearing query.
         assert!(d.params_schema["properties"].get("context_lines").is_some());
+    }
+
+    #[test]
+    fn find_implementations_descriptor_contract() {
+        let d = GotoQueryOp::implementations().descriptor();
+        assert_eq!(d.id, "find-implementations");
+        assert_eq!(d.kind, OperationKind::Query);
+        assert_eq!(d.target, TargetKind::Position);
     }
 
     #[test]
