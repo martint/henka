@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 use crate::error::JavaError;
 use crate::jdtls::{JdtlsInstall, JdtlsSession, index_base};
 use crate::operations::{
-    ChangeSignatureOp, CodeActionOp, FindUsagesOp, MoveOp, RenameOp, SymbolSearchOp,
+    ChangeSignatureOp, CodeActionOp, FindUsagesOp, GotoQueryOp, MoveOp, RenameOp, SymbolSearchOp,
 };
 
 #[async_trait]
@@ -100,6 +100,7 @@ impl LanguageProvider for JavaProvider {
             Arc::new(RenameOp),
             Arc::new(FindUsagesOp),
             Arc::new(SymbolSearchOp),
+            Arc::new(GotoQueryOp::definition()),
             Arc::new(ChangeSignatureOp),
             Arc::new(MoveOp),
         ];

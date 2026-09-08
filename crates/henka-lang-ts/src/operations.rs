@@ -178,6 +178,80 @@ impl Operation for SymbolSearchOp {
     }
 }
 
+/// A position-targeted query that resolves the symbol under the position to a
+/// set of locations — the goto family. One struct serves each of them: they
+/// differ only in the request issued and the key their list is published under,
+/// and the work either side of the request is the same.
+pub struct GotoQueryOp {
+    id: &'static str,
+    title: &'static str,
+    description: &'static str,
+    /// The LSP request to issue (e.g. `textDocument/definition`).
+    method: &'static str,
+    /// The key the location list is published under (e.g. `definitions`).
+    result_key: &'static str,
+}
+
+impl GotoQueryOp {
+    /// Resolve the symbol at a position to where it is declared.
+    pub fn definition() -> Self {
+        Self {
+            id: "go-to-definition",
+            title: "Go to definition",
+            description: "Resolve the symbol at the given position to where it is defined",
+            method: "textDocument/definition",
+            result_key: "definitions",
+        }
+    }
+}
+
+#[async_trait]
+impl Operation for GotoQueryOp {
+    fn descriptor(&self) -> OperationDescriptor {
+        OperationDescriptor {
+            id: self.id.into(),
+            title: self.title.into(),
+            description: self.description.into(),
+            kind: OperationKind::Query,
+            languages: languages(),
+            target: TargetKind::Position,
+            params_schema: json!({
+                "type": "object",
+                "properties": {
+                    "context_lines": henka_lsp::context_lines_param()
+                }
+            }),
+        }
+    }
+
+    async fn run(
+        &self,
+        ctx: &OperationCtx<'_>,
+        req: &OperationRequest,
+    ) -> CoreResult<OperationOutcome> {
+        let session = ts(ctx)?;
+        let (file, position) = position_target(req)?;
+
+        session.ensure_indexed().await.map_err(backend)?;
+        let uri = session.ensure_open(file).await.map_err(backend)?;
+        let result: Value = session
+            .client()
+            .request(
+                self.method,
+                json!({
+                    "textDocument": { "uri": uri },
+                    "position": { "line": position.line, "character": position.character },
+                }),
+            )
+            .await
+            .map_err(backend)?;
+
+        let out = henka_lsp::goto_to_query(result, &source(session, req), self.result_key)
+            .map_err(backend)?;
+        Ok(OperationOutcome::Query(out))
+    }
+}
+
 /// Find every reference to the symbol at a position.
 pub struct FindUsagesOp;
 

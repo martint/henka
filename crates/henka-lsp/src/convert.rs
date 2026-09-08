@@ -78,6 +78,32 @@ struct LspLocation {
     range: LspRange,
 }
 
+/// One end of a goto response. `textDocument/definition` and its siblings may
+/// answer with a `Location` (`uri`/`range`) or a `LocationLink`
+/// (`targetUri`/`targetRange`/`targetSelectionRange`); which one arrives is a
+/// property of the server, not of the question asked, so both are accepted.
+#[derive(Debug, Deserialize)]
+struct LspGotoTarget {
+    #[serde(default)]
+    uri: Option<String>,
+    #[serde(default)]
+    range: Option<LspRange>,
+    #[serde(rename = "targetUri", default)]
+    target_uri: Option<String>,
+    #[serde(rename = "targetRange", default)]
+    target_range: Option<LspRange>,
+    #[serde(rename = "targetSelectionRange", default)]
+    target_selection_range: Option<LspRange>,
+}
+
+/// A goto response as it arrives: one target, or a list of them.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LspGotoResponse {
+    Many(Vec<LspGotoTarget>),
+    One(LspGotoTarget),
+}
+
 /// A `workspace/symbol` match's location. LSP 3.17 allows a `WorkspaceSymbol`
 /// to report just a `uri`, leaving `range` for a later `workspaceSymbol/resolve`
 /// call; Henka doesn't advertise that capability, so such a symbol is dropped
@@ -370,6 +396,46 @@ pub fn locations_to_query(value: Value, source: &Source<'_>) -> Result<Value> {
     Ok(json!({ "count": usages.len(), "usages": usages }))
 }
 
+/// Convert an LSP goto response — `textDocument/definition` and its siblings —
+/// into a structured list published under `key`, each entry quoting the source
+/// it points at.
+///
+/// The answer is always a list, even where the common case has one element: a
+/// definition can legitimately be several places (an overload set, an ambient
+/// declaration beside its implementation), and a caller that must handle
+/// "sometimes an object, sometimes an array" is one that will handle it wrong.
+pub fn goto_to_query(value: Value, source: &Source<'_>, key: &str) -> Result<Value> {
+    if value.is_null() {
+        return Ok(json!({ "count": 0, key: [] }));
+    }
+    let targets = match serde_json::from_value::<LspGotoResponse>(value)? {
+        LspGotoResponse::Many(targets) => targets,
+        LspGotoResponse::One(target) => vec![target],
+    };
+
+    let items: Vec<Value> = targets
+        .into_iter()
+        .filter_map(|t| {
+            let uri = t.uri.or(t.target_uri)?;
+            // For a `LocationLink`, the selection range is the target's own
+            // identifier — the coordinate a position-targeted operation wants,
+            // and one line of source rather than a whole declaration.
+            let range = t.range.or(t.target_selection_range).or(t.target_range)?;
+            let mut entry = json!({
+                "file": source.rel(&uri),
+                "start_line": range.start.line,
+                "start_character": range.start.character,
+                "end_line": range.end.line,
+                "end_character": range.end.character,
+            });
+            source.annotate(&mut entry, &uri, &range);
+            Some(entry)
+        })
+        .collect();
+
+    Ok(json!({ "count": items.len(), key: items }))
+}
+
 /// The default cap on the number of symbols `symbols_to_query` returns when
 /// the caller doesn't specify a `limit`.
 pub const DEFAULT_SYMBOL_SEARCH_LIMIT: usize = 200;
@@ -586,6 +652,67 @@ mod tests {
             uri_to_path("file:///a/b%20c/D.java"),
             PathBuf::from("/a/b c/D.java")
         );
+    }
+
+    #[test]
+    fn goto_accepts_a_single_location() {
+        let (dir, file) = tree("Foo.java", "package p;\nclass Foo {}\n");
+        let value = json!({
+            "uri": path_to_uri(&file),
+            "range": {"start": {"line": 1, "character": 6}, "end": {"line": 1, "character": 9}}
+        });
+        let source = Source::new(dir.path(), dir.path().to_path_buf(), 0);
+        let out = goto_to_query(value, &source, "definitions").unwrap();
+        assert_eq!(out["count"], json!(1));
+        assert_eq!(out["definitions"][0]["file"], json!("Foo.java"));
+        assert_eq!(out["definitions"][0]["text"], json!("class Foo {}"));
+    }
+
+    #[test]
+    fn goto_accepts_a_location_array() {
+        let value = json!([
+            {
+                "uri": "file:///proj/A.ts",
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}}
+            },
+            {
+                "uri": "file:///proj/B.ts",
+                "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 3}}
+            }
+        ]);
+        let out = goto_to_query(value, &at_root("/proj"), "definitions").unwrap();
+        assert_eq!(out["count"], json!(2));
+        assert_eq!(out["definitions"][1]["file"], json!("B.ts"));
+    }
+
+    #[test]
+    fn goto_link_prefers_the_selection_range() {
+        let value = json!([{
+            "targetUri": "file:///proj/src/lib.rs",
+            "targetRange": {"start": {"line": 10, "character": 0}, "end": {"line": 20, "character": 1}},
+            "targetSelectionRange": {"start": {"line": 10, "character": 7}, "end": {"line": 10, "character": 10}}
+        }]);
+        let out = goto_to_query(value, &at_root("/proj"), "definitions").unwrap();
+        assert_eq!(out["definitions"][0]["start_character"], json!(7));
+        assert_eq!(out["definitions"][0]["end_line"], json!(10));
+    }
+
+    #[test]
+    fn goto_link_without_a_selection_range_uses_the_target_range() {
+        let value = json!([{
+            "targetUri": "file:///proj/src/lib.rs",
+            "targetRange": {"start": {"line": 10, "character": 0}, "end": {"line": 20, "character": 1}}
+        }]);
+        let out = goto_to_query(value, &at_root("/proj"), "definitions").unwrap();
+        assert_eq!(out["definitions"][0]["end_line"], json!(20));
+    }
+
+    #[test]
+    fn goto_nothing_found_is_an_empty_result() {
+        let out = goto_to_query(Value::Null, &at_root("/proj"), "definitions").unwrap();
+        assert_eq!(out, json!({ "count": 0, "definitions": [] }));
+        let out = goto_to_query(json!([]), &at_root("/proj"), "definitions").unwrap();
+        assert_eq!(out, json!({ "count": 0, "definitions": [] }));
     }
 
     #[test]
