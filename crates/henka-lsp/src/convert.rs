@@ -155,6 +155,21 @@ struct LspDocumentSymbol {
     container_name: Option<String>,
 }
 
+/// A `CallHierarchyItem` — the language server's own handle on one declaration,
+/// returned by `textDocument/prepareCallHierarchy` and required back verbatim
+/// on the follow-up call.
+#[derive(Debug, Deserialize)]
+struct LspCallHierarchyItem {
+    name: String,
+    kind: u32,
+    #[serde(default)]
+    detail: Option<String>,
+    uri: String,
+    range: LspRange,
+    #[serde(rename = "selectionRange")]
+    selection_range: LspRange,
+}
+
 /// A `workspace/symbol` match's location. LSP 3.17 allows a `WorkspaceSymbol`
 /// to report just a `uri`, leaving `range` for a later `workspaceSymbol/resolve`
 /// call; Henka doesn't advertise that capability, so such a symbol is dropped
@@ -586,6 +601,47 @@ fn outline_entry(item: LspDocumentSymbol, source: &Source<'_>, uri: &str) -> Opt
     Some(entry)
 }
 
+/// Convert a `textDocument/prepareCallHierarchy` response into the items a
+/// position resolves to, each quoting its declaration line.
+pub fn call_hierarchy_items_to_query(value: Value, source: &Source<'_>) -> Result<Value> {
+    if value.is_null() {
+        return Ok(json!({ "count": 0, "items": [] }));
+    }
+    let raw: Vec<Value> = serde_json::from_value(value)?;
+    let items: Vec<Value> = raw.iter().filter_map(|r| call_item(r, source)).collect();
+    Ok(json!({ "count": items.len(), "items": items }))
+}
+
+/// Normalize one call hierarchy item, keeping the server's own handle on it.
+///
+/// A normalized item is not a valid handle: servers attach a private `data`
+/// field and require the item back unchanged on `callHierarchy/incomingCalls`
+/// and `outgoingCalls` (jdtls does exactly this). So the entry carries both —
+/// readable fields to decide *which* item is wanted, and `item`, the raw
+/// `CallHierarchyItem` to name it again with.
+fn call_item(raw: &Value, source: &Source<'_>) -> Option<Value> {
+    let parsed: LspCallHierarchyItem = serde_json::from_value(raw.clone()).ok()?;
+    // Quote and address the declaration by its name, not its body.
+    let name_range = parsed.selection_range;
+    let mut entry = json!({
+        "name": parsed.name,
+        "kind": symbol_kind_name(parsed.kind),
+        "file": source.rel(&parsed.uri),
+        "start_line": name_range.start.line,
+        "start_character": name_range.start.character,
+        "end_line": name_range.end.line,
+        "end_character": name_range.end.character,
+        "body_start_line": parsed.range.start.line,
+        "body_end_line": parsed.range.end.line,
+        "item": raw.clone(),
+    });
+    if let Some(detail) = parsed.detail {
+        entry["detail"] = json!(detail);
+    }
+    source.annotate(&mut entry, &parsed.uri, &name_range);
+    Some(entry)
+}
+
 /// The default cap on the number of symbols `symbols_to_query` returns when
 /// the caller doesn't specify a `limit`.
 pub const DEFAULT_SYMBOL_SEARCH_LIMIT: usize = 200;
@@ -802,6 +858,43 @@ mod tests {
             uri_to_path("file:///a/b%20c/D.java"),
             PathBuf::from("/a/b c/D.java")
         );
+    }
+
+    #[test]
+    fn call_hierarchy_item_keeps_the_servers_own_handle() {
+        let (dir, file) = tree("Foo.java", "class Foo {\n  void run() {}\n}\n");
+        let uri = path_to_uri(&file);
+        let value = json!([{
+            "name": "run",
+            "kind": 6,
+            "detail": "Foo.run()",
+            "uri": uri,
+            "range": {"start": {"line": 1, "character": 2}, "end": {"line": 1, "character": 16}},
+            "selectionRange": {"start": {"line": 1, "character": 7}, "end": {"line": 1, "character": 10}},
+            "data": { "opaque": "jdtls-private" }
+        }]);
+        let source = Source::new(dir.path(), dir.path().to_path_buf(), 0);
+        let out = call_hierarchy_items_to_query(value, &source).unwrap();
+
+        assert_eq!(out["count"], json!(1));
+        let item = &out["items"][0];
+        assert_eq!(item["name"], json!("run"));
+        assert_eq!(item["kind"], json!("method"));
+        assert_eq!(item["file"], json!("Foo.java"));
+        assert_eq!(item["start_line"], json!(1));
+        assert_eq!(item["start_character"], json!(7));
+        assert_eq!(item["body_end_line"], json!(1));
+        assert_eq!(item["detail"], json!("Foo.run()"));
+        assert_eq!(item["text"], json!("  void run() {}"));
+        // The server's private data survives untouched, so the item can be
+        // handed back on the follow-up call.
+        assert_eq!(item["item"]["data"]["opaque"], json!("jdtls-private"));
+    }
+
+    #[test]
+    fn call_hierarchy_on_a_position_that_resolves_to_nothing_is_empty() {
+        let out = call_hierarchy_items_to_query(Value::Null, &at_root("/proj")).unwrap();
+        assert_eq!(out, json!({ "count": 0, "items": [] }));
     }
 
     #[test]

@@ -16,8 +16,8 @@ use tokio::sync::Mutex;
 
 use crate::error::TsError;
 use crate::operations::{
-    CodeActionOp, DescribeSymbolOp, FileOutlineOp, FindUsagesOp, GotoQueryOp, RenameOp,
-    SymbolSearchOp,
+    CodeActionOp, DescribeSymbolOp, FileOutlineOp, FindUsagesOp, GotoQueryOp, PrepareCallHierarchyOp,
+    RenameOp, SymbolSearchOp,
 };
 use crate::server::{TsSession, locate};
 
@@ -106,6 +106,7 @@ impl LanguageProvider for TsProvider {
             Arc::new(GotoQueryOp::implementations()),
             Arc::new(DescribeSymbolOp),
             Arc::new(FileOutlineOp),
+            Arc::new(PrepareCallHierarchyOp),
             ];
         ops.extend(CodeActionOp::ts_set());
         ops

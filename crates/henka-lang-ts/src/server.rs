@@ -195,6 +195,7 @@ async fn initialize(client: &LspClient, root: &Path) -> Result<()> {
                 "definition": { "dynamicRegistration": true },
                 "implementation": { "dynamicRegistration": true },
                 "documentSymbol": { "dynamicRegistration": true, "hierarchicalDocumentSymbolSupport": true },
+                "callHierarchy": { "dynamicRegistration": true },
                 "codeAction": {
                     "dynamicRegistration": true,
                     "codeActionLiteralSupport": {

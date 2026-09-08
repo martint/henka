@@ -883,6 +883,59 @@ impl Operation for FileOutlineOp {
     }
 }
 
+/// Resolve a position to the call hierarchy items it names, for the incoming-
+/// and outgoing-calls queries to walk.
+pub struct PrepareCallHierarchyOp;
+
+#[async_trait]
+impl Operation for PrepareCallHierarchyOp {
+    fn descriptor(&self) -> OperationDescriptor {
+        OperationDescriptor {
+            id: "prepare-call-hierarchy".into(),
+            title: "Prepare call hierarchy".into(),
+            description: "Resolve the position to the call hierarchy items to walk with \
+                          incoming-calls or outgoing-calls"
+                .into(),
+            kind: OperationKind::Query,
+            languages: vec![Language::Java],
+            target: TargetKind::Position,
+            params_schema: json!({
+                "type": "object",
+                "properties": {
+                    "context_lines": lsp::context_lines_param()
+                }
+            }),
+        }
+    }
+
+    async fn run(
+        &self,
+        ctx: &OperationCtx<'_>,
+        req: &OperationRequest,
+    ) -> CoreResult<OperationOutcome> {
+        let session = jdtls(ctx)?;
+        let (file, position) = position_target(req)?;
+
+        session.ensure_indexed().await.map_err(backend)?;
+        let uri = session.ensure_open(file).await.map_err(backend)?;
+        let result: Value = session
+            .client()
+            .request(
+                "textDocument/prepareCallHierarchy",
+                json!({
+                    "textDocument": { "uri": uri },
+                    "position": { "line": position.line, "character": position.character },
+                }),
+            )
+            .await
+            .map_err(backend)?;
+
+        let out = lsp::call_hierarchy_items_to_query(result, &source(session, req))
+            .map_err(backend)?;
+        Ok(OperationOutcome::Query(out))
+    }
+}
+
 /// Find every reference to the symbol at a position.
 pub struct FindUsagesOp;
 
