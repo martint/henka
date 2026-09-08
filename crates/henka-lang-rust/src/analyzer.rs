@@ -182,6 +182,7 @@ async fn initialize(client: &LspClient, root: &Path) -> Result<()> {
                 "hover": { "dynamicRegistration": true, "contentFormat": ["markdown", "plaintext"] },
                 "definition": { "dynamicRegistration": true },
                 "implementation": { "dynamicRegistration": true },
+                "documentSymbol": { "dynamicRegistration": true, "hierarchicalDocumentSymbolSupport": true },
                 "codeAction": {
                     "dynamicRegistration": true,
                     "codeActionLiteralSupport": {

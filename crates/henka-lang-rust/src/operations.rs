@@ -31,6 +31,16 @@ fn position_target(req: &OperationRequest) -> CoreResult<(&PathBuf, Position)> {
     }
 }
 
+/// Extract a whole-file target.
+fn file_target(req: &OperationRequest) -> CoreResult<&PathBuf> {
+    match &req.target {
+        Target::File { file } => Ok(file),
+        _ => Err(CoreError::InvalidTarget(
+            "this operation expects a file".into(),
+        )),
+    }
+}
+
 /// The extra lines of context a request asked for around each result location.
 fn context_lines(req: &OperationRequest) -> usize {
     req.params
@@ -484,6 +494,54 @@ impl Operation for DescribeSymbolOp {
             .map_err(backend)?;
 
         let out = henka_lsp::hover_to_query(result).map_err(backend)?;
+        Ok(OperationOutcome::Query(out))
+    }
+}
+
+/// List the symbols declared in a file, nested as they are in the source.
+pub struct FileOutlineOp;
+
+#[async_trait]
+impl Operation for FileOutlineOp {
+    fn descriptor(&self) -> OperationDescriptor {
+        OperationDescriptor {
+            id: "file-outline".into(),
+            title: "File outline".into(),
+            description: "List the symbols declared in the given file, with their coordinates"
+                .into(),
+            kind: OperationKind::Query,
+            languages: vec![Language::Rust],
+            target: TargetKind::File,
+            params_schema: json!({
+                "type": "object",
+                "properties": {
+                    "context_lines": henka_lsp::context_lines_param()
+                }
+            }),
+        }
+    }
+
+    async fn run(
+        &self,
+        ctx: &OperationCtx<'_>,
+        req: &OperationRequest,
+    ) -> CoreResult<OperationOutcome> {
+        let session = ra(ctx)?;
+        let file = file_target(req)?;
+
+        session.ensure_indexed().await.map_err(backend)?;
+        let uri = session.ensure_open(file).await.map_err(backend)?;
+        let result: Value = session
+            .client()
+            .request(
+                "textDocument/documentSymbol",
+                json!({ "textDocument": { "uri": uri } }),
+            )
+            .await
+            .map_err(backend)?;
+
+        let out = henka_lsp::document_symbols_to_query(result, &source(session, req), &uri)
+            .map_err(backend)?;
         Ok(OperationOutcome::Query(out))
     }
 }

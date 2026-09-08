@@ -19,13 +19,13 @@ use serde_json::{Value, json};
 
 use crate::Result;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize)]
 struct LspPosition {
     line: u32,
     character: u32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize)]
 struct LspRange {
     start: LspPosition,
     end: LspPosition,
@@ -130,6 +130,29 @@ struct LspHover {
     contents: LspHoverContents,
     #[serde(default)]
     range: Option<LspRange>,
+}
+
+/// A `textDocument/documentSymbol` entry. Servers answer with either the
+/// hierarchical `DocumentSymbol` (`range`/`selectionRange`/`children`) or the
+/// older flat `SymbolInformation` (`location`/`containerName`); both are
+/// accepted, since which one arrives is a property of the server.
+#[derive(Debug, Deserialize)]
+struct LspDocumentSymbol {
+    name: String,
+    kind: u32,
+    #[serde(default)]
+    detail: Option<String>,
+    #[serde(default)]
+    range: Option<LspRange>,
+    #[serde(rename = "selectionRange", default)]
+    selection_range: Option<LspRange>,
+    #[serde(default)]
+    children: Option<Vec<LspDocumentSymbol>>,
+    /// Present only on the flat `SymbolInformation` form.
+    #[serde(default)]
+    location: Option<LspLocation>,
+    #[serde(rename = "containerName", default)]
+    container_name: Option<String>,
 }
 
 /// A `workspace/symbol` match's location. LSP 3.17 allows a `WorkspaceSymbol`
@@ -503,6 +526,66 @@ fn hover_text(contents: &LspHoverContents) -> String {
     }
 }
 
+/// Convert a `textDocument/documentSymbol` response into a file outline: the
+/// symbols declared in `uri`, nested as they are in the source, each quoting
+/// its declaration line.
+///
+/// `count` is the number of top-level symbols; nested ones are counted inside
+/// their parent's `children`.
+pub fn document_symbols_to_query(value: Value, source: &Source<'_>, uri: &str) -> Result<Value> {
+    if value.is_null() {
+        return Ok(json!({ "count": 0, "symbols": [] }));
+    }
+    let items: Vec<LspDocumentSymbol> = serde_json::from_value(value)?;
+    let symbols: Vec<Value> = items
+        .into_iter()
+        .filter_map(|item| outline_entry(item, source, uri))
+        .collect();
+    Ok(json!({ "count": symbols.len(), "symbols": symbols }))
+}
+
+/// One outline entry, with its children beneath it.
+fn outline_entry(item: LspDocumentSymbol, source: &Source<'_>, uri: &str) -> Option<Value> {
+    // The flat form carries its range under `location`; the hierarchical form
+    // has a declaration `range` and, inside it, the name's `selectionRange`.
+    let full = item.range.or_else(|| item.location.map(|l| l.range))?;
+    // Quote and address the symbol by its name, not its body: a class's
+    // declaration range spans the whole file, and quoting that would return
+    // the file — the read this operation exists to avoid.
+    let name_range = item.selection_range.unwrap_or(full);
+
+    let mut entry = json!({
+        "name": item.name,
+        "kind": symbol_kind_name(item.kind),
+        "start_line": name_range.start.line,
+        "start_character": name_range.start.character,
+        "end_line": name_range.end.line,
+        "end_character": name_range.end.character,
+        // The extent of the declaration, so a caller can read just this member
+        // instead of the whole file.
+        "body_start_line": full.start.line,
+        "body_end_line": full.end.line,
+    });
+    if let Some(detail) = item.detail {
+        entry["detail"] = json!(detail);
+    }
+    if let Some(container) = item.container_name {
+        entry["container_name"] = json!(container);
+    }
+    source.annotate(&mut entry, uri, &name_range);
+
+    // A flat response has no nesting to report; it is left childless rather
+    // than reassembled into a tree by guessing at names.
+    let children: Vec<Value> = item
+        .children
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|child| outline_entry(child, source, uri))
+        .collect();
+    entry["children"] = json!(children);
+    Some(entry)
+}
+
 /// The default cap on the number of symbols `symbols_to_query` returns when
 /// the caller doesn't specify a `limit`.
 pub const DEFAULT_SYMBOL_SEARCH_LIMIT: usize = 200;
@@ -719,6 +802,71 @@ mod tests {
             uri_to_path("file:///a/b%20c/D.java"),
             PathBuf::from("/a/b c/D.java")
         );
+    }
+
+    #[test]
+    fn outline_nests_children_and_quotes_declarations() {
+        let (dir, file) = tree(
+            "Foo.java",
+            "package p;\n\npublic class Foo {\n  int size() { return 1; }\n}\n",
+        );
+        let uri = path_to_uri(&file);
+        let value = json!([{
+            "name": "Foo",
+            "kind": 5,
+            "range": {"start": {"line": 2, "character": 0}, "end": {"line": 4, "character": 1}},
+            "selectionRange": {"start": {"line": 2, "character": 13}, "end": {"line": 2, "character": 16}},
+            "children": [{
+                "name": "size",
+                "kind": 6,
+                "detail": "() : int",
+                "range": {"start": {"line": 3, "character": 2}, "end": {"line": 3, "character": 26}},
+                "selectionRange": {"start": {"line": 3, "character": 6}, "end": {"line": 3, "character": 10}}
+            }]
+        }]);
+        let source = Source::new(dir.path(), dir.path().to_path_buf(), 0);
+        let out = document_symbols_to_query(value, &source, &uri).unwrap();
+
+        assert_eq!(out["count"], json!(1));
+        let class = &out["symbols"][0];
+        assert_eq!(class["kind"], json!("class"));
+        assert_eq!(class["text"], json!("public class Foo {"));
+        // Addressed by its name, with the declaration's extent alongside.
+        assert_eq!(class["start_line"], json!(2));
+        assert_eq!(class["start_character"], json!(13));
+        assert_eq!(class["body_end_line"], json!(4));
+
+        let method = &class["children"][0];
+        assert_eq!(method["name"], json!("size"));
+        assert_eq!(method["detail"], json!("() : int"));
+        assert_eq!(method["text"], json!("  int size() { return 1; }"));
+        assert_eq!(method["children"], json!([]));
+    }
+
+    #[test]
+    fn outline_accepts_the_flat_symbol_information_form() {
+        let value = json!([{
+            "name": "helper",
+            "kind": 12,
+            "location": {
+                "uri": "file:///proj/a.ts",
+                "range": {"start": {"line": 7, "character": 9}, "end": {"line": 7, "character": 15}}
+            },
+            "containerName": "mod"
+        }]);
+        let out = document_symbols_to_query(value, &at_root("/proj"), "file:///proj/a.ts").unwrap();
+        let sym = &out["symbols"][0];
+        assert_eq!(sym["kind"], json!("function"));
+        assert_eq!(sym["container_name"], json!("mod"));
+        assert_eq!(sym["start_line"], json!(7));
+        // No nesting is reported rather than inferred from names.
+        assert_eq!(sym["children"], json!([]));
+    }
+
+    #[test]
+    fn outline_of_a_file_without_symbols_is_empty() {
+        let out = document_symbols_to_query(Value::Null, &at_root("/proj"), "file:///proj/a.ts").unwrap();
+        assert_eq!(out, json!({ "count": 0, "symbols": [] }));
     }
 
     #[test]

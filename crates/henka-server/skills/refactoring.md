@@ -18,6 +18,10 @@ guessing which hit is the declaration — it resolves the name straight to a fil
 range you can hand to `find-usages`, `rename`, or any other position-targeted
 operation.
 
+**Outline a file before reading it.** `file-outline` returns the file's symbols —
+nested, each with its name's coordinates and declaration line — for a fraction of the
+file's length, and hands you the coordinates the position-targeted operations need.
+
 **Ask what a symbol is rather than reading for it.** `describe-symbol` returns the
 resolved type, the selected overload's signature, and the documentation — including for
 a dependency whose source isn't in the tree — where reading the declaration would cost a
@@ -34,7 +38,8 @@ Operations come in two kinds:
 - **Edits** — refactorings (rename, extract, inline, organize-imports) and structural
   search-and-replace. These change code and support a preview.
 - **Queries** — read-only semantic navigation: find-usages, go-to-definition,
-  find-implementations, describe-symbol, call/type hierarchy, symbol search.
+  find-implementations, describe-symbol, file-outline, call/type hierarchy, symbol
+  search.
 
 ## 1. Find or register the project
 
