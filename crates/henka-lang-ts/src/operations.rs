@@ -8,7 +8,7 @@ use henka_core::operation::{
     Operation, OperationCtx, OperationDescriptor, OperationKind, OperationOutcome,
     OperationRequest, Target, TargetKind,
 };
-use henka_core::{Error as CoreError, Language, Position, Result as CoreResult};
+use henka_core::{Error as CoreError, Language, LanguageRoute, Position, Result as CoreResult};
 use serde_json::{Value, json};
 
 use crate::server::TsSession;
@@ -422,6 +422,91 @@ impl Operation for PrepareCallHierarchyOp {
             .map_err(backend)?;
         Ok(OperationOutcome::Query(out))
     }
+}
+
+/// The `item` parameter the call-hierarchy directions take, as a JSON Schema
+/// property. It is the server's own handle on a declaration and is passed back
+/// unchanged: servers attach private data to it and reject an item without it.
+fn call_hierarchy_item_param() -> Value {
+    json!({
+        "type": "object",
+        "description": "A call hierarchy item, taken verbatim from a prepare-call-hierarchy \
+                        result's `item` field. Treat it as opaque and pass it back unmodified."
+    })
+}
+
+/// Extract the required `item` parameter.
+fn call_hierarchy_item(req: &OperationRequest) -> CoreResult<&Value> {
+    req.params
+        .get("item")
+        .filter(|item| item.is_object())
+        .ok_or_else(|| {
+            CoreError::InvalidTarget(
+                "`item` is required: run prepare-call-hierarchy first and pass one of its \
+                 `item` values back unchanged"
+                    .into(),
+            )
+        })
+}
+
+/// Ready the session for a call-hierarchy query: warm the index, and open the
+/// file the item lives in so the server answers from the content the rest of
+/// the session sees. A file outside the project (a dependency's source) simply
+/// isn't opened.
+async fn prepare_for_call_query(session: &TsSession, item: &Value) -> CoreResult<()> {
+    session.ensure_indexed().await.map_err(backend)?;
+    if let Some(uri) = item.get("uri").and_then(Value::as_str) {
+        let _ = session.ensure_open(&henka_lsp::uri_to_path(uri)).await;
+    }
+    Ok(())
+}
+
+/// Find the callers of a call hierarchy item.
+pub struct IncomingCallsOp;
+
+#[async_trait]
+impl Operation for IncomingCallsOp {
+    fn descriptor(&self) -> OperationDescriptor {
+        OperationDescriptor {
+            id: "incoming-calls".into(),
+            title: "Incoming calls".into(),
+            description: "Find the callers of a call hierarchy item, with their call sites".into(),
+            kind: OperationKind::Query,
+            languages: languages(),
+            target: TargetKind::Project,
+            params_schema: json!({
+                "type": "object",
+                "required": ["item"],
+                "properties": {
+                    "item": call_hierarchy_item_param(),
+                    "context_lines": henka_lsp::context_lines_param()
+                }
+            }),
+        }
+    }
+
+    async fn run(
+        &self,
+        ctx: &OperationCtx<'_>,
+        req: &OperationRequest,
+    ) -> CoreResult<OperationOutcome> {
+        let session = ts(ctx)?;
+        let item = call_hierarchy_item(req)?;
+
+        prepare_for_call_query(session, item).await?;
+        let result: Value = session
+            .client()
+            .request("callHierarchy/incomingCalls", json!({ "item": item }))
+            .await
+            .map_err(backend)?;
+
+        let out = henka_lsp::incoming_calls_to_query(result, &source(session, req)).map_err(backend)?;
+        Ok(OperationOutcome::Query(out))
+    }
+    fn route(&self, params: &Value) -> LanguageRoute {
+        henka_lsp::call_hierarchy_item_route(params)
+    }
+
 }
 
 /// Find every reference to the symbol at a position.

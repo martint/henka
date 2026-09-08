@@ -18,7 +18,7 @@ use crate::error::JavaError;
 use crate::jdtls::{JdtlsInstall, JdtlsSession, index_base};
 use crate::operations::{
     ChangeSignatureOp, CodeActionOp, DescribeSymbolOp, FileOutlineOp, FindUsagesOp, GotoQueryOp,
-    MoveOp, PrepareCallHierarchyOp, RenameOp, SymbolSearchOp,
+    IncomingCallsOp, MoveOp, PrepareCallHierarchyOp, RenameOp, SymbolSearchOp,
 };
 
 #[async_trait]
@@ -106,6 +106,7 @@ impl LanguageProvider for JavaProvider {
             Arc::new(DescribeSymbolOp),
             Arc::new(FileOutlineOp),
             Arc::new(PrepareCallHierarchyOp),
+            Arc::new(IncomingCallsOp),
             Arc::new(ChangeSignatureOp),
             Arc::new(MoveOp),
         ];

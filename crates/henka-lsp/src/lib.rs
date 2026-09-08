@@ -9,9 +9,10 @@ pub mod session;
 
 pub use client::LspClient;
 pub use convert::{
-    DEFAULT_SYMBOL_SEARCH_LIMIT, MAX_CONTEXT_LINES, Source, call_hierarchy_items_to_query,
+    DEFAULT_SYMBOL_SEARCH_LIMIT, MAX_CONTEXT_LINES, Source, call_hierarchy_item_route,
+    call_hierarchy_items_to_query,
     context_lines_param,
-    document_symbols_to_query, goto_to_query,
+    document_symbols_to_query, goto_to_query, incoming_calls_to_query,
     hover_to_query, locations_to_query, symbols_to_query, to_core_workspace_edit, uri_to_path,
 };
 pub use error::{LspError, Result};

@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use henka_core::{
-    FileEdit, FileOperation, Position, PositionEncoding, Range, TextEdit, WorkspaceEdit,
+    FileEdit, FileOperation, Language, LanguageRoute, Position, PositionEncoding, Range, TextEdit,
+    WorkspaceEdit,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -642,6 +643,79 @@ fn call_item(raw: &Value, source: &Source<'_>) -> Option<Value> {
     Some(entry)
 }
 
+/// Convert a `callHierarchy/incomingCalls` response into the callers of the
+/// queried item: each caller as a normalized item (its opaque handle included,
+/// so the walk can continue), paired with the call sites inside it.
+pub fn incoming_calls_to_query(value: Value, source: &Source<'_>) -> Result<Value> {
+    calls_to_query(value, source, "from", None)
+}
+
+/// Shared shape behind the two call-hierarchy directions. `direction` is the
+/// field naming the other end of the call — kept as `from`/`to` rather than
+/// normalized to one neutral name, because a caller and a callee are not
+/// interchangeable and a saved result should say which it holds.
+///
+/// `sites_in` is the file the call sites live in: for incoming calls that is
+/// each caller's own file, so it is read per entry; for outgoing calls every
+/// call site is in the *queried* item's file, which is passed in.
+fn calls_to_query(
+    value: Value,
+    source: &Source<'_>,
+    direction: &str,
+    sites_in: Option<&str>,
+) -> Result<Value> {
+    if value.is_null() {
+        return Ok(json!({ "count": 0, "calls": [] }));
+    }
+    let raw: Vec<Value> = serde_json::from_value(value)?;
+
+    let calls: Vec<Value> = raw
+        .iter()
+        .filter_map(|entry| {
+            let other = call_item(entry.get(direction)?, source)?;
+            let sites_uri = sites_in
+                .map(str::to_string)
+                .or_else(|| {
+                    entry
+                        .get(direction)?
+                        .get("uri")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .unwrap_or_default();
+            let ranges: Vec<Value> = entry
+                .get("fromRanges")
+                .and_then(Value::as_array)
+                .map(|ranges| call_sites(ranges, source, &sites_uri))
+                .unwrap_or_default();
+            Some(json!({ direction: other, "ranges": ranges }))
+        })
+        .collect();
+
+    Ok(json!({ "count": calls.len(), "calls": calls }))
+}
+
+/// The call sites themselves, each quoting the line the call is written on —
+/// which is how a caller tells `foo(a, b)` from `foo(a, b, c)` without opening
+/// the file.
+fn call_sites(ranges: &[Value], source: &Source<'_>, uri: &str) -> Vec<Value> {
+    ranges
+        .iter()
+        .filter_map(|r| {
+            let range: LspRange = serde_json::from_value(r.clone()).ok()?;
+            let mut entry = json!({
+                "file": source.rel(uri),
+                "start_line": range.start.line,
+                "start_character": range.start.character,
+                "end_line": range.end.line,
+                "end_character": range.end.character,
+            });
+            source.annotate(&mut entry, uri, &range);
+            Some(entry)
+        })
+        .collect()
+}
+
 /// The default cap on the number of symbols `symbols_to_query` returns when
 /// the caller doesn't specify a `limit`.
 pub const DEFAULT_SYMBOL_SEARCH_LIMIT: usize = 200;
@@ -736,6 +810,35 @@ fn symbol_kind_name(kind: u32) -> String {
         other => return other.to_string(),
     }
     .to_string()
+}
+
+/// Where a call-hierarchy request belongs, read from the `item` parameter's
+/// URI. An item belongs to one file, and only the server that indexed that file
+/// can expand it — a project-scoped request carries no target to route by, so
+/// the item itself names the language.
+///
+/// The URI is not always a plain path: a server hands back its own handles for
+/// sources it holds outside the working copy (jdtls issues
+/// `jdt://contents/java.base/java.io/PrintStream.java?…` for a class it has as
+/// bytecode), keeping the source's name in the path and its own metadata in the
+/// query string. Reading the path alone leaves those with the server that
+/// issued them; an item this cannot place is reported as such, rather than
+/// offered to servers that never saw it.
+pub fn call_hierarchy_item_route(params: &Value) -> LanguageRoute {
+    let Some(uri) = params.pointer("/item/uri").and_then(Value::as_str) else {
+        return LanguageRoute::Unspecified;
+    };
+    match Language::from_path(&uri_to_path(uri_path(uri))) {
+        Some(language) => LanguageRoute::Language(language),
+        None => LanguageRoute::Unplaceable(uri.to_string()),
+    }
+}
+
+/// A URI's path, without the query string or fragment a server may hang off its
+/// own handles.
+fn uri_path(uri: &str) -> &str {
+    let end = uri.find(['?', '#']).unwrap_or(uri.len());
+    &uri[..end]
 }
 
 /// Convert a `file://` URI back to a path, decoding the characters we encode.
@@ -861,6 +964,49 @@ mod tests {
     }
 
     #[test]
+    fn incoming_calls_quote_the_caller_and_its_call_sites() {
+        let (dir, file) = tree(
+            "Caller.java",
+            "class Caller {\n  void go() {\n    target(1);\n  }\n}\n",
+        );
+        let uri = path_to_uri(&file);
+        let value = json!([{
+            "from": {
+                "name": "go",
+                "kind": 6,
+                "uri": uri,
+                "range": {"start": {"line": 1, "character": 2}, "end": {"line": 3, "character": 3}},
+                "selectionRange": {"start": {"line": 1, "character": 7}, "end": {"line": 1, "character": 9}},
+                "data": { "opaque": "keep-me" }
+            },
+            "fromRanges": [
+                {"start": {"line": 2, "character": 4}, "end": {"line": 2, "character": 10}}
+            ]
+        }]);
+        let source = Source::new(dir.path(), dir.path().to_path_buf(), 0);
+        let out = incoming_calls_to_query(value, &source).unwrap();
+
+        assert_eq!(out["count"], json!(1));
+        let call = &out["calls"][0];
+        // The caller: its declaration line, and a handle to keep walking.
+        assert_eq!(call["from"]["name"], json!("go"));
+        assert_eq!(call["from"]["text"], json!("  void go() {"));
+        assert_eq!(call["from"]["item"]["data"]["opaque"], json!("keep-me"));
+        // The call site: the line the call is written on.
+        assert_eq!(call["ranges"][0]["file"], json!("Caller.java"));
+        assert_eq!(call["ranges"][0]["start_line"], json!(2));
+        assert_eq!(call["ranges"][0]["text"], json!("    target(1);"));
+    }
+
+    #[test]
+    fn a_method_with_no_callers_is_an_empty_result() {
+        let out = incoming_calls_to_query(Value::Null, &at_root("/proj")).unwrap();
+        assert_eq!(out, json!({ "count": 0, "calls": [] }));
+        let out = incoming_calls_to_query(json!([]), &at_root("/proj")).unwrap();
+        assert_eq!(out["count"], json!(0));
+    }
+
+    #[test]
     fn call_hierarchy_item_keeps_the_servers_own_handle() {
         let (dir, file) = tree("Foo.java", "class Foo {\n  void run() {}\n}\n");
         let uri = path_to_uri(&file);
@@ -889,6 +1035,32 @@ mod tests {
         // The server's private data survives untouched, so the item can be
         // handed back on the follow-up call.
         assert_eq!(item["item"]["data"]["opaque"], json!("jdtls-private"));
+    }
+
+    #[test]
+    fn a_call_hierarchy_item_routes_to_the_server_that_issued_it() {
+        let route = |uri: &str| call_hierarchy_item_route(&json!({ "item": { "uri": uri } }));
+
+        assert_eq!(
+            route("file:///proj/src/Foo.java"),
+            LanguageRoute::Language(Language::Java)
+        );
+        // jdtls hands back its own handle for a class it only has as bytecode:
+        // the source name is in the path, its metadata in the query string.
+        let jdt = "jdt://contents/java.base/java.io/PrintStream.java\
+                   ?=proj/%5C/jre%5C/java.base=/maven.pomderived=/true=/=/false=/=/PrintStream.class";
+        assert_eq!(route(jdt), LanguageRoute::Language(Language::Java));
+        // An item Henka cannot place names itself in the route, so dispatch can
+        // say which handle it refused rather than trying every server.
+        assert_eq!(
+            route("nowhere://opaque/handle"),
+            LanguageRoute::Unplaceable("nowhere://opaque/handle".into())
+        );
+        // No item at all: nothing to route by.
+        assert_eq!(
+            call_hierarchy_item_route(&json!({})),
+            LanguageRoute::Unspecified
+        );
     }
 
     #[test]

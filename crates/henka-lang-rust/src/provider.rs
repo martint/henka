@@ -17,7 +17,8 @@ use tokio::sync::Mutex;
 use crate::analyzer::{RaSession, locate};
 use crate::error::RustError;
 use crate::operations::{
-    CodeActionOp, DescribeSymbolOp, FileOutlineOp, FindUsagesOp, GotoQueryOp, PrepareCallHierarchyOp,
+    CodeActionOp, DescribeSymbolOp, FileOutlineOp, FindUsagesOp, GotoQueryOp, IncomingCallsOp,
+    PrepareCallHierarchyOp,
     RenameOp, SymbolSearchOp,
 };
 
@@ -104,6 +105,7 @@ impl LanguageProvider for RustProvider {
             Arc::new(DescribeSymbolOp),
             Arc::new(FileOutlineOp),
             Arc::new(PrepareCallHierarchyOp),
+            Arc::new(IncomingCallsOp),
             ];
         ops.extend(CodeActionOp::rust_set());
         ops
