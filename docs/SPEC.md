@@ -68,6 +68,11 @@ The catalog is open-ended and language-scoped: an operation exists for a languag
 that language's provider offers it. `organize-imports` is meaningful for Java and is offered
 there; a language for which it makes no sense simply never lists it.
 
+Several languages may offer an operation under the same id, and a project may have several of
+those languages at once. A call names the operation, never the language: the server routes the
+request to the language that serves it, and a project-scoped query that every language can
+answer runs on each of them with the answers merged. Spec 0003 states those rules.
+
 ### 2.5 Target
 
 The *target* tells an operation where to act. Depending on the operation it is one of:
@@ -216,6 +221,9 @@ in what else they offer.
   as far as possible.
 - Requests against an unknown project, an unsupported operation, or a not-yet-ready index return
   explicit, distinguishable errors rather than silent no-ops.
+- A request naming a language no provider serves, or carrying an opaque handle the server cannot
+  place, fails before running rather than being broadened into a search of every language
+  (spec 0003 §5).
 
 ## 12. Configuration & operation
 

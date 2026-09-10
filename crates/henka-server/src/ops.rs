@@ -230,3 +230,152 @@ fn get_u32(args: &JsonObject, key: &str) -> Result<u32, McpError> {
             )
         })
 }
+
+/// The cap a query's result lists have to respect: the caller's `limit`, else
+/// the default the operation declares for it. `None` when the operation takes
+/// no `limit` at all.
+pub fn result_limit(params: &Value, params_schema: &Value) -> Option<usize> {
+    params
+        .get("limit")
+        .or_else(|| params_schema.pointer("/properties/limit/default"))
+        .and_then(Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok())
+}
+
+/// Combine the results of one project-scoped query that several languages
+/// answered into a single result holding at most `limit` of each kind of match.
+///
+/// A project-scoped query names no file, so in a mixed-language project every
+/// language's server can hold part of the answer. The result shapes belong to
+/// the operations, so the merge is structural, matching how those results are
+/// built — a list of findings alongside counters and flags describing it:
+/// objects merge key by key, lists concatenate, counts add, flags or together,
+/// and anything else keeps the first language's answer.
+///
+/// Every language applied the caller's cap to its own answer, so their
+/// concatenation can exceed it; the merged lists are cut back to it, while the
+/// counts keep reporting everything matched, as they do for a single language.
+pub fn merge_query_results(results: Vec<Value>, limit: Option<usize>) -> Value {
+    let merged = results.into_iter().reduce(merge).unwrap_or_else(|| json!({}));
+    match limit {
+        Some(limit) => cap_lists(merged, limit),
+        None => merged,
+    }
+}
+
+/// Cut every list in a merged result back to `limit`, flagging `truncated` when
+/// one was shortened — the same signal an operation raises when it caps its own
+/// answer, so a caller can tell it has not seen everything.
+fn cap_lists(mut merged: Value, limit: usize) -> Value {
+    let Value::Object(fields) = &mut merged else {
+        return merged;
+    };
+    let mut truncated = false;
+    for value in fields.values_mut() {
+        if let Value::Array(items) = value
+            && items.len() > limit
+        {
+            items.truncate(limit);
+            truncated = true;
+        }
+    }
+    if truncated {
+        fields.insert("truncated".into(), json!(true));
+    }
+    merged
+}
+
+fn merge(left: Value, right: Value) -> Value {
+    match (left, right) {
+        (Value::Object(mut left), Value::Object(right)) => {
+            for (key, value) in right {
+                let merged = match left.remove(&key) {
+                    Some(existing) => merge(existing, value),
+                    None => value,
+                };
+                left.insert(key, merged);
+            }
+            Value::Object(left)
+        }
+        (Value::Array(mut left), Value::Array(right)) => {
+            left.extend(right);
+            Value::Array(left)
+        }
+        (Value::Bool(left), Value::Bool(right)) => json!(left || right),
+        (Value::Number(left), Value::Number(right)) => {
+            match (left.as_u64(), right.as_u64()) {
+                (Some(left), Some(right)) => json!(left + right),
+                _ => Value::Number(left),
+            }
+        }
+        (left, _) => left,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merging_one_result_leaves_it_alone() {
+        let one = json!({ "count": 1, "symbols": [{ "name": "Foo" }] });
+        assert_eq!(merge_query_results(vec![one.clone()], None), one);
+    }
+
+    #[test]
+    fn merging_concatenates_lists_adds_counts_and_ors_flags() {
+        let merged = merge_query_results(
+            vec![
+                json!({ "count": 2, "symbols": ["a", "b"], "truncated": false }),
+                json!({ "count": 1, "symbols": ["c"], "truncated": true }),
+            ],
+            None,
+        );
+        assert_eq!(
+            merged,
+            json!({ "count": 3, "symbols": ["a", "b", "c"], "truncated": true })
+        );
+    }
+
+    #[test]
+    fn merging_keeps_keys_only_one_language_reported() {
+        let merged = merge_query_results(
+            vec![json!({ "symbols": [] }), json!({ "symbols": [], "truncated": true })],
+            None,
+        );
+        assert_eq!(merged, json!({ "symbols": [], "truncated": true }));
+    }
+
+    #[test]
+    fn merging_nothing_is_an_empty_result() {
+        assert_eq!(merge_query_results(vec![], None), json!({}));
+    }
+    #[test]
+    fn merged_lists_are_cut_back_to_the_limit() {
+        // Each language returned one match under `limit: 1`, so neither capped
+        // its own answer; their concatenation is cut back and flagged, while
+        // `count` still reports everything that matched.
+        let merged = merge_query_results(
+            vec![json!({ "count": 1, "symbols": ["a"] }), json!({ "count": 1, "symbols": ["b"] })],
+            Some(1),
+        );
+        assert_eq!(merged, json!({ "count": 2, "symbols": ["a"], "truncated": true }));
+    }
+
+    #[test]
+    fn a_merged_list_within_the_limit_is_not_flagged() {
+        let merged = merge_query_results(
+            vec![json!({ "count": 1, "symbols": ["a"] }), json!({ "count": 1, "symbols": ["b"] })],
+            Some(2),
+        );
+        assert_eq!(merged, json!({ "count": 2, "symbols": ["a", "b"] }));
+    }
+
+    #[test]
+    fn the_limit_is_the_callers_else_the_operations_default() {
+        let schema = json!({ "properties": { "limit": { "default": 200 } } });
+        assert_eq!(result_limit(&json!({ "limit": 5 }), &schema), Some(5));
+        assert_eq!(result_limit(&json!({}), &schema), Some(200));
+        assert_eq!(result_limit(&json!({}), &json!({ "properties": {} })), None);
+    }
+}

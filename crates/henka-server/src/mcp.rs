@@ -9,11 +9,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use henka_core::operation::{OperationCtx, OperationOutcome, OperationRequest};
+use henka_core::operation::{
+    LanguageRoute, Operation, OperationCtx, OperationDescriptor, OperationKind, OperationOutcome,
+    OperationRequest, TargetKind,
+};
 use henka_core::{
-    ChangedFile, EditApplier, Error as CoreError, FileOperation, Language, OperationRegistry,
-    Project, ProjectRegistry, ProviderRegistry, Target, WorkspaceEdit, detect_revision,
-    repo_identity, working_copy_delta, working_copy_fingerprint,
+    ChangedFile, EditApplier, Error as CoreError, FileOperation, Language, LanguageProvider,
+    LanguageSession, OperationRegistry, Project, ProjectRegistry, ProviderRegistry, RequestGuard,
+    Target, WorkspaceEdit, detect_revision, repo_identity, working_copy_delta,
+    working_copy_fingerprint,
 };
 use rmcp::model::{
     Annotated, CallToolRequestParams, CallToolResult, Content, Implementation,
@@ -395,9 +399,9 @@ impl HenkaMcp {
         }
     }
 
-    /// Run a catalog operation: resolve the project and operation, build the
-    /// request, run it, and either return the query result or preview/apply the
-    /// edit.
+    /// Run a catalog operation: resolve the project, choose the language(s) that
+    /// will serve the request, run the operation on each, and either return the
+    /// query result or preview/apply the edit.
     async fn dispatch_operation(
         &self,
         name: &str,
@@ -411,43 +415,30 @@ impl HenkaMcp {
             reg.get(&project_id).map_err(into_mcp)?.clone()
         };
 
-        let operation = self
-            .operations
-            .resolve(name, &project.languages)
-            .map_err(|_| {
-                McpError::invalid_params(
-                    format!("unknown tool or operation `{name}` for project `{project_id}`"),
-                    None,
-                )
-            })?;
-        let descriptor = operation.descriptor();
+        // The project's languages that contribute an operation under this id.
+        let candidates = self.operations.languages_for(name, &project.languages);
+        let Some(&any) = candidates.first() else {
+            return Err(McpError::invalid_params(
+                format!("unknown tool or operation `{name}` for project `{project_id}`"),
+                None,
+            ));
+        };
+        // Every registration under one id declares the same target shape and
+        // reads the same parameters, so any one of them describes the request;
+        // the operation that runs it is resolved per language below.
+        let described_by = self.operations.resolve(name, any).map_err(into_mcp)?;
+        let descriptor = described_by.descriptor();
 
         let mut target = ops::parse_target(&args, descriptor.target)?;
         remap_target_file(&self.path_map, &mut target);
         let params = ops::operation_params(&args);
-
-        // Route to the provider for the target file's language when a project
-        // spans more than one; fall back to the first applicable language.
-        let language = target
-            .file()
-            .and_then(|f| Language::from_path(f))
-            .filter(|&l| project.has_language(l) && descriptor.applies_to(l))
-            .or_else(|| {
-                project
-                    .languages
-                    .iter()
-                    .copied()
-                    .find(|&l| descriptor.applies_to(l))
-            })
-            .ok_or_else(|| {
-                McpError::invalid_params(
-                    format!("operation `{name}` does not apply to this project's languages"),
-                    None,
-                )
-            })?;
-        let provider = self.providers.get(language).ok_or_else(|| {
-            McpError::internal_error(format!("no provider registered for `{language}`"), None)
-        })?;
+        let languages = dispatch_languages(
+            &candidates,
+            &self.providers,
+            &descriptor,
+            &target,
+            described_by.route(&params),
+        )?;
 
         // Resolve and validate the working copy the edits should land in.
         let workspace = resolve_workspace(&args, &target, &project, &self.path_map);
@@ -458,63 +449,199 @@ impl HenkaMcp {
         // turning a silent mis-target into an actionable error.
         validate_expectation(&args, &target, &workspace)?;
 
-        let session = provider.session(&project).await.map_err(into_mcp)?;
+        // Only a read-only, project-scoped query is served by several
+        // languages; an edit resolves to exactly one, so the first edit outcome
+        // is the only one.
+        let mut queries = Vec::with_capacity(languages.len());
+        let mut asked: Vec<Arc<dyn LanguageProvider>> = Vec::new();
+        for language in languages {
+            let provider = self.provider_for(language)?;
+            // One provider can serve several of the project's languages — one
+            // TypeScript server answers for JavaScript too — and its single
+            // session covers all of them at once. Asking it per language would
+            // run the same query twice and count every match twice.
+            if asked.iter().any(|asked| Arc::ptr_eq(asked, &provider)) {
+                continue;
+            }
+            asked.push(Arc::clone(&provider));
+
+            let operation = self.operations.resolve(name, language).map_err(into_mcp)?;
+            let (session, guard, outcome) = self
+                .run_operation(operation, &provider, &project, &target, &params, &workspace)
+                .await?;
+            match outcome {
+                OperationOutcome::Query(value) => queries.push(value),
+                OperationOutcome::Edit(edit) => {
+                    // Hold the request guard through the edit's application and
+                    // the index sync that follows it, so a concurrent request
+                    // can't reach the session while the coordinates it would
+                    // resolve against are still changing.
+                    let finished = self.finish_edit(edit, &session, &args, &workspace).await;
+                    drop(guard);
+                    return finished;
+                }
+            }
+        }
+        let limit = ops::result_limit(&params, &descriptor.params_schema);
+        ok_json(&ops::merge_query_results(queries, limit))
+    }
+
+    /// The provider registered for `language`.
+    fn provider_for(&self, language: Language) -> Result<Arc<dyn LanguageProvider>, McpError> {
+        self.providers.get(language).ok_or_else(|| {
+            McpError::internal_error(format!("no provider registered for `{language}`"), None)
+        })
+    }
+
+    /// Run `operation` on the session `provider` holds for `project`, with
+    /// `workspace`'s content overlaid on that session's index, returning the
+    /// session and the still-held request guard alongside the outcome.
+    async fn run_operation(
+        &self,
+        operation: Arc<dyn Operation>,
+        provider: &Arc<dyn LanguageProvider>,
+        project: &Project,
+        target: &Target,
+        params: &Value,
+        workspace: &Path,
+    ) -> Result<(Arc<dyn LanguageSession>, RequestGuard, OperationOutcome), McpError> {
+        let session = provider.session(project).await.map_err(into_mcp)?;
         // Serialize the request and overlay the working copy's content onto the
-        // shared index, so the operation sees that working copy. The guard and
-        // overlay are released/restored before returning.
-        let _guard = session.begin_request().await;
-        let on_base = session.root() == Some(workspace.as_path());
+        // shared index, so the operation sees that working copy. The overlay is
+        // restored before returning; the guard travels back to the caller, which
+        // holds it until any edit the operation produced has been applied.
+        let guard = session.begin_request().await;
+        let on_base = session.root() == Some(workspace);
         if !on_base {
-            let delta = working_copy_delta(&workspace);
+            let delta = working_copy_delta(workspace);
             session
-                .overlay_workspace(&workspace, &delta)
+                .overlay_workspace(workspace, &delta)
                 .await
                 .map_err(into_mcp)?;
         }
 
         let ctx = OperationCtx {
-            project: &project,
+            project,
             session: Arc::clone(&session),
         };
-        let req = OperationRequest { target, params };
+        let req = OperationRequest {
+            target: target.clone(),
+            params: params.clone(),
+        };
         let outcome = operation.run(&ctx, &req).await;
 
         // Always restore the base index view, even if the operation failed.
         session.restore_overlay().await;
-        let outcome = outcome.map_err(into_mcp)?;
+        Ok((session, guard, outcome.map_err(into_mcp)?))
+    }
 
-        match outcome {
-            OperationOutcome::Query(value) => ok_json(&value),
-            OperationOutcome::Edit(mut edit) => {
-                // Retarget the edit (computed against the session's checkout)
-                // onto the requested working copy, then refuse to escape it.
-                if let Some(root) = session.root() {
-                    edit.retarget(root, &workspace);
-                }
-                reject_edits_outside(&edit, &workspace)?;
-                // Echo the working copy the edit was resolved against, and the
-                // revision it holds, so a caller can confirm the server acted on
-                // its own tree — even when the two see it under different mount
-                // paths — instead of inferring it from the registered root.
-                let acted_on = json!({
-                    "workspace": workspace,
-                    "revision": detect_revision(&workspace).map(|r| r.id),
-                });
-                if ops::dry_run(&args) {
-                    let files = EditApplier::preview(&edit, &workspace).map_err(into_mcp)?;
-                    ok_json(&json!({ "dry_run": true, "workspace": acted_on, "files": files }))
-                } else {
-                    let applied = EditApplier::apply(&edit, &workspace).map_err(into_mcp)?;
-                    // When editing the session's own checkout, keep its view
-                    // current so later operations see the applied changes.
-                    if on_base {
-                        session.sync_changed(&applied.changed_files).await;
-                    }
-                    ok_json(&json!({ "dry_run": false, "workspace": acted_on, "applied": applied }))
-                }
+    /// Preview or apply an edit an operation produced, reporting the working
+    /// copy it landed in.
+    async fn finish_edit(
+        &self,
+        mut edit: WorkspaceEdit,
+        session: &Arc<dyn LanguageSession>,
+        args: &JsonObject,
+        workspace: &Path,
+    ) -> Result<CallToolResult, McpError> {
+        // Retarget the edit (computed against the session's checkout) onto the
+        // requested working copy, then refuse to escape it.
+        if let Some(root) = session.root() {
+            edit.retarget(root, workspace);
+        }
+        reject_edits_outside(&edit, workspace)?;
+        // Echo the working copy the edit was resolved against, and the revision
+        // it holds, so a caller can confirm the server acted on its own tree —
+        // even when the two see it under different mount paths — instead of
+        // inferring it from the registered root.
+        let acted_on = json!({
+            "workspace": workspace,
+            "revision": detect_revision(workspace).map(|r| r.id),
+        });
+        if ops::dry_run(args) {
+            let files = EditApplier::preview(&edit, workspace).map_err(into_mcp)?;
+            ok_json(&json!({ "dry_run": true, "workspace": acted_on, "files": files }))
+        } else {
+            let applied = EditApplier::apply(&edit, workspace).map_err(into_mcp)?;
+            // When editing the session's own checkout, keep its view current so
+            // later operations see the applied changes.
+            if session.root() == Some(workspace) {
+                session.sync_changed(&applied.changed_files).await;
             }
+            ok_json(&json!({ "dry_run": false, "workspace": acted_on, "applied": applied }))
         }
     }
+}
+
+/// The languages that should serve a request.
+///
+/// The target file's language when it names one, else the language the
+/// operation reads out of its own parameters, resolved to the candidate whose
+/// backend serves it. Failing both, a project-scoped query names no file at all
+/// and every candidate language can hold part of the answer, so all of them
+/// serve it; anything else falls back to the first, as before.
+///
+/// A request that does name where it belongs and cannot be placed there is
+/// refused rather than broadened: fanning a handle out to backends that did not
+/// issue it invites an unrelated backend's error to bury the right answer.
+fn dispatch_languages(
+    candidates: &[Language],
+    providers: &ProviderRegistry,
+    descriptor: &OperationDescriptor,
+    target: &Target,
+    route: LanguageRoute,
+) -> Result<Vec<Language>, McpError> {
+    let named = target
+        .file()
+        .and_then(|file| Language::from_path(file))
+        .or_else(|| route.language());
+    if let Some(language) = named {
+        let Some(candidate) = serving_candidate(candidates, providers, language) else {
+            return Err(McpError::invalid_params(
+                format!(
+                    "`{}` is not served for `{language}` in this project",
+                    descriptor.id
+                ),
+                None,
+            ));
+        };
+        return Ok(vec![candidate]);
+    }
+    if let LanguageRoute::Unplaceable(handle) = route {
+        return Err(McpError::invalid_params(
+            format!(
+                "cannot tell which language `{handle}` belongs to, so `{}` has nowhere to run;                  pass a handle this project's servers issued",
+                descriptor.id
+            ),
+            None,
+        ));
+    }
+    if descriptor.target == TargetKind::Project && descriptor.kind == OperationKind::Query {
+        return Ok(candidates.to_vec());
+    }
+    Ok(candidates.first().copied().into_iter().collect())
+}
+
+/// The candidate language whose backend serves `language`.
+///
+/// `language` itself when it is one of them, else the candidate sharing its
+/// provider: one backend can serve several languages — one TypeScript server
+/// answers for JavaScript too — so a JavaScript file in a project whose only
+/// detected languages are Java and TypeScript still has somewhere to go.
+fn serving_candidate(
+    candidates: &[Language],
+    providers: &ProviderRegistry,
+    language: Language,
+) -> Option<Language> {
+    if candidates.contains(&language) {
+        return Some(language);
+    }
+    let serving = providers.get(language)?;
+    candidates.iter().copied().find(|&candidate| {
+        providers
+            .get(candidate)
+            .is_some_and(|provider| Arc::ptr_eq(&provider, &serving))
+    })
 }
 
 /// Resolve the working copy a request's edits should be applied to: an explicit
@@ -943,6 +1070,7 @@ mod tests {
         FileEdit, Language, LanguageProvider, LanguageSession, PositionEncoding, Range, Result,
         TextEdit, WorkspaceEdit,
     };
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
 
@@ -1023,6 +1151,199 @@ mod tests {
                 _ => 0,
             };
             Ok(OperationOutcome::Query(json!({ "line": line })))
+        }
+    }
+
+    /// Reports which language's provider ran it, so a test can see where
+    /// dispatch sent a request. `hinted` reads the language out of the `item`
+    /// parameter, the way a call-hierarchy operation does.
+    struct WhichLanguage {
+        id: &'static str,
+        language: Language,
+        target: TargetKind,
+        hinted: bool,
+    }
+
+    #[async_trait]
+    impl Operation for WhichLanguage {
+        fn descriptor(&self) -> OperationDescriptor {
+            OperationDescriptor {
+                id: self.id.into(),
+                title: "Which language".into(),
+                description: "Report the language that ran this".into(),
+                kind: OperationKind::Query,
+                languages: vec![self.language],
+                target: self.target,
+                params_schema: json!({ "type": "object", "properties": {} }),
+            }
+        }
+
+        async fn run(
+            &self,
+            _ctx: &OperationCtx<'_>,
+            _req: &OperationRequest,
+        ) -> Result<OperationOutcome> {
+            Ok(OperationOutcome::Query(
+                json!({ "count": 1, "languages": [self.language.as_str()] }),
+            ))
+        }
+
+        fn route(&self, params: &Value) -> LanguageRoute {
+            if !self.hinted {
+                return LanguageRoute::Unspecified;
+            }
+            let Some(uri) = params.pointer("/item/uri").and_then(Value::as_str) else {
+                return LanguageRoute::Unspecified;
+            };
+            match Language::from_path(Path::new(uri.trim_start_matches("file://"))) {
+                Some(language) => LanguageRoute::Language(language),
+                None => LanguageRoute::Unplaceable(uri.into()),
+            }
+        }
+    }
+
+    /// Stands in for `symbol-search`: a project-scoped query reporting one
+    /// match per backend, named after the backend, capped at the caller's
+    /// `limit` the way the real operations cap their own answers.
+    struct SymbolSearchMock {
+        languages: Vec<Language>,
+        name: &'static str,
+    }
+
+    #[async_trait]
+    impl Operation for SymbolSearchMock {
+        fn descriptor(&self) -> OperationDescriptor {
+            OperationDescriptor {
+                id: "symbols".into(),
+                title: "Symbols".into(),
+                description: "Search the project's symbols".into(),
+                kind: OperationKind::Query,
+                languages: self.languages.clone(),
+                target: TargetKind::Project,
+                params_schema: json!({
+                    "type": "object",
+                    "properties": { "limit": { "type": "integer", "default": 200 } }
+                }),
+            }
+        }
+
+        async fn run(
+            &self,
+            _ctx: &OperationCtx<'_>,
+            req: &OperationRequest,
+        ) -> Result<OperationOutcome> {
+            let limit = req.params.get("limit").and_then(Value::as_u64).map_or(200, |n| n as usize);
+            let symbols: Vec<Value> =
+                std::iter::once(json!({ "name": self.name })).take(limit).collect();
+            Ok(OperationOutcome::Query(json!({ "count": 1, "symbols": symbols })))
+        }
+    }
+
+    struct SymbolProvider {
+        language: Language,
+        languages: Vec<Language>,
+        name: &'static str,
+    }
+
+    #[async_trait]
+    impl LanguageProvider for SymbolProvider {
+        fn language(&self) -> Language {
+            self.language
+        }
+        fn operations(&self) -> Vec<Arc<dyn Operation>> {
+            vec![Arc::new(SymbolSearchMock {
+                languages: self.languages.clone(),
+                name: self.name,
+            })]
+        }
+        async fn session(&self, _project: &Project) -> Result<Arc<dyn LanguageSession>> {
+            Ok(Arc::new(WhichSession(self.language)))
+        }
+    }
+
+    /// A session that serializes requests behind a mutex and records, from
+    /// inside `sync_changed`, whether that mutex was still held — that is,
+    /// whether the request guard outlived the edit's application.
+    struct LockingSession {
+        root: PathBuf,
+        lock: Arc<tokio::sync::Mutex<()>>,
+        held_during_sync: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl LanguageSession for LockingSession {
+        fn language(&self) -> Language {
+            Language::Java
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn root(&self) -> Option<&Path> {
+            Some(&self.root)
+        }
+        async fn begin_request(&self) -> RequestGuard {
+            RequestGuard::holding(Box::new(Arc::clone(&self.lock).lock_owned().await))
+        }
+        async fn sync_changed(&self, _changed: &[PathBuf]) {
+            self.held_during_sync.store(self.lock.try_lock().is_err(), Ordering::SeqCst);
+        }
+    }
+
+    struct LockingProvider(Arc<LockingSession>);
+
+    #[async_trait]
+    impl LanguageProvider for LockingProvider {
+        fn language(&self) -> Language {
+            Language::Java
+        }
+        fn operations(&self) -> Vec<Arc<dyn Operation>> {
+            vec![Arc::new(InsertOp)]
+        }
+        async fn session(&self, _project: &Project) -> Result<Arc<dyn LanguageSession>> {
+            Ok(Arc::clone(&self.0) as Arc<dyn LanguageSession>)
+        }
+    }
+
+    struct WhichProvider(Language);
+    #[async_trait]
+    impl LanguageProvider for WhichProvider {
+        fn language(&self) -> Language {
+            self.0
+        }
+        fn operations(&self) -> Vec<Arc<dyn Operation>> {
+            vec![
+                Arc::new(WhichLanguage {
+                    id: "which",
+                    language: self.0,
+                    target: TargetKind::Position,
+                    hinted: false,
+                }),
+                Arc::new(WhichLanguage {
+                    id: "which-project",
+                    language: self.0,
+                    target: TargetKind::Project,
+                    hinted: false,
+                }),
+                Arc::new(WhichLanguage {
+                    id: "which-item",
+                    language: self.0,
+                    target: TargetKind::Project,
+                    hinted: true,
+                }),
+            ]
+        }
+        async fn session(&self, _project: &Project) -> Result<Arc<dyn LanguageSession>> {
+            Ok(Arc::new(WhichSession(self.0)))
+        }
+    }
+
+    struct WhichSession(Language);
+    impl LanguageSession for WhichSession {
+        fn language(&self) -> Language {
+            self.0
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
         }
     }
 
@@ -1457,5 +1778,262 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.message.contains("unknown tool or operation"));
+    }
+
+    /// Build a handler over a project holding both Java and TypeScript sources,
+    /// with a provider registered for each — the mixed-language project where
+    /// dispatch has to pick.
+    fn mixed_handler(dir: &Path) -> (HenkaMcp, std::path::PathBuf) {
+        let cfg = dir.join("projects.toml");
+        let root = dir.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("pom.xml"), "<project/>").unwrap();
+        std::fs::write(root.join("Main.java"), "hello\n").unwrap();
+        std::fs::write(root.join("app.ts"), "export {};\n").unwrap();
+
+        let mut registry = ProjectRegistry::load(&cfg).unwrap();
+        let project = registry.register(Some("p".into()), &root).unwrap().clone();
+        assert!(project.has_language(Language::Java));
+        assert!(project.has_language(Language::TypeScript));
+
+        let mut providers = ProviderRegistry::new();
+        providers.register(Arc::new(WhichProvider(Language::Java)));
+        providers.register(Arc::new(WhichProvider(Language::TypeScript)));
+
+        (HenkaMcp::new(registry, providers), root)
+    }
+
+    /// The `languages` list a `WhichLanguage` result reports.
+    fn languages_in(result: &CallToolResult) -> Vec<String> {
+        let text = match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => t.text.clone(),
+            _ => panic!("expected text content"),
+        };
+        serde_json::from_str::<Value>(&text).unwrap()["languages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn file_targeted_operation_runs_on_its_own_languages_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mcp, _) = mixed_handler(dir.path());
+
+        for (file, language) in [("app.ts", "typescript"), ("Main.java", "java")] {
+            let result = mcp
+                .handle_call(call(
+                    "which",
+                    args(json!({ "project": "p", "file": file, "line": 0, "character": 0 })),
+                ))
+                .await
+                .unwrap();
+            assert_ne!(result.is_error, Some(true));
+            assert_eq!(languages_in(&result), vec![language.to_string()]);
+        }
+    }
+
+    #[tokio::test]
+    async fn project_scoped_query_is_answered_by_every_language() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mcp, _) = mixed_handler(dir.path());
+
+        let result = mcp
+            .handle_call(call("which-project", args(json!({ "project": "p" }))))
+            .await
+            .unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert_eq!(languages_in(&result), vec!["java", "typescript"]);
+    }
+
+    #[tokio::test]
+    async fn project_scoped_query_follows_the_language_named_in_its_params() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mcp, root) = mixed_handler(dir.path());
+
+        let uri = format!("file://{}", root.join("app.ts").display());
+        let result = mcp
+            .handle_call(call(
+                "which-item",
+                args(json!({ "project": "p", "item": { "uri": uri } })),
+            ))
+            .await
+            .unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert_eq!(languages_in(&result), vec!["typescript"]);
+    }
+    /// Build a handler over a project holding `files`, served by `providers`.
+    fn handler_over(
+        dir: &Path,
+        files: &[(&str, &str)],
+        providers: ProviderRegistry,
+    ) -> (HenkaMcp, std::path::PathBuf) {
+        let cfg = dir.join("projects.toml");
+        let root = dir.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        for (name, content) in files {
+            std::fs::write(root.join(name), content).unwrap();
+        }
+        let mut registry = ProjectRegistry::load(&cfg).unwrap();
+        let root = registry.register(Some("p".into()), &root).unwrap().root.clone();
+        (HenkaMcp::new(registry, providers), root)
+    }
+
+    /// The whole result a `SymbolSearchMock` dispatch produced.
+    fn result_json(result: &CallToolResult) -> Value {
+        let text = match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => t.text.clone(),
+            _ => panic!("expected text content"),
+        };
+        serde_json::from_str(&text).unwrap()
+    }
+
+    #[tokio::test]
+    async fn one_backend_serving_two_languages_answers_a_project_query_once() {
+        // A TypeScript project with a JavaScript file in it: both languages are
+        // detected, but one backend searches both, so the query must reach it
+        // once rather than double every match it reports.
+        let dir = tempfile::tempdir().unwrap();
+        let mut providers = ProviderRegistry::new();
+        providers.register_for(
+            &[Language::TypeScript, Language::JavaScript],
+            Arc::new(SymbolProvider {
+                language: Language::TypeScript,
+                languages: vec![Language::TypeScript, Language::JavaScript],
+                name: "typescript",
+            }),
+        );
+        let files = [("app.ts", "export {};\n"), ("rollup.config.js", "\n")];
+        let (mcp, _) = handler_over(dir.path(), &files, providers);
+
+        let result = mcp
+            .handle_call(call("symbols", args(json!({ "project": "p" }))))
+            .await
+            .unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert_eq!(
+            result_json(&result),
+            json!({ "count": 1, "symbols": [{ "name": "typescript" }] })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_merged_query_respects_the_limit_the_caller_asked_for() {
+        // Two backends, one match each: `limit: 1` caps neither on its own, so
+        // the cap has to reach the merged list — with `count` still reporting
+        // both matches.
+        let dir = tempfile::tempdir().unwrap();
+        let mut providers = ProviderRegistry::new();
+        providers.register(Arc::new(SymbolProvider {
+            language: Language::Java,
+            languages: vec![Language::Java],
+            name: "java",
+        }));
+        providers.register(Arc::new(SymbolProvider {
+            language: Language::TypeScript,
+            languages: vec![Language::TypeScript],
+            name: "typescript",
+        }));
+        let files = [("Main.java", "hello\n"), ("app.ts", "export {};\n")];
+        let (mcp, _) = handler_over(dir.path(), &files, providers);
+
+        let result = mcp
+            .handle_call(call("symbols", args(json!({ "project": "p", "limit": 1 }))))
+            .await
+            .unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert_eq!(
+            result_json(&result),
+            json!({ "count": 2, "symbols": [{ "name": "java" }], "truncated": true })
+        );
+    }
+
+    #[tokio::test]
+    async fn the_request_guard_outlives_the_edit_and_its_index_sync() {
+        // The guard serializes requests against the shared session; releasing it
+        // before the edit is applied and synced would let the next request
+        // resolve coordinates this one is still changing.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let held = Arc::new(AtomicBool::new(false));
+        let session = Arc::new(LockingSession {
+            root: root.canonicalize().unwrap_or(root),
+            lock: Arc::new(tokio::sync::Mutex::new(())),
+            held_during_sync: Arc::clone(&held),
+        });
+        let mut providers = ProviderRegistry::new();
+        providers.register(Arc::new(LockingProvider(Arc::clone(&session))));
+        let (mcp, project_root) =
+            handler_over(dir.path(), &[("Main.java", "hello\n")], providers);
+        // The session has to be rooted at the edited working copy, or dispatch
+        // never reaches the sync this is about.
+        assert_eq!(session.root(), Some(project_root.as_path()));
+
+        let applied = mcp
+            .handle_call(call(
+                "insert-text",
+                args(json!({
+                    "project": "p", "file": "Main.java", "line": 0, "character": 0,
+                    "text": "X", "dry_run": false
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_ne!(applied.is_error, Some(true));
+        assert!(
+            held.load(Ordering::SeqCst),
+            "the request guard was released before the index sync"
+        );
+    }
+    #[tokio::test]
+    async fn a_handle_from_a_shared_backend_reaches_that_backend() {
+        // A Java/TypeScript project with no JavaScript of its own: a JavaScript
+        // handle still belongs to the TypeScript server, which serves both, so
+        // it must go there rather than to every language in the project.
+        let dir = tempfile::tempdir().unwrap();
+        let mut providers = ProviderRegistry::new();
+        providers.register(Arc::new(WhichProvider(Language::Java)));
+        providers.register_for(
+            &[Language::TypeScript, Language::JavaScript],
+            Arc::new(WhichProvider(Language::TypeScript)),
+        );
+        let files = [("Main.java", "hello\n"), ("app.ts", "export {};\n")];
+        let (mcp, root) = handler_over(dir.path(), &files, providers);
+
+        let uri = format!("file://{}", root.join("vendor/bundle.js").display());
+        let result = mcp
+            .handle_call(call(
+                "which-item",
+                args(json!({ "project": "p", "item": { "uri": uri } })),
+            ))
+            .await
+            .unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert_eq!(languages_in(&result), vec!["typescript"]);
+    }
+
+    #[tokio::test]
+    async fn an_unplaceable_handle_is_refused_rather_than_fanned_out() {
+        // A handle naming no language Henka serves has no right backend. Asking
+        // every language instead would let an unrelated backend's error bury
+        // the answer, so the request is refused, naming the handle.
+        let dir = tempfile::tempdir().unwrap();
+        let (mcp, _) = mixed_handler(dir.path());
+
+        let err = mcp
+            .handle_call(call(
+                "which-item",
+                args(json!({ "project": "p", "item": { "uri": "nowhere://opaque/handle" } })),
+            ))
+            .await
+            .unwrap_err();
+        assert!(
+            err.message.contains("nowhere://opaque/handle") && err.message.contains("which-item"),
+            "got: {}",
+            err.message
+        );
     }
 }

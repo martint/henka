@@ -145,6 +145,41 @@ pub trait Operation: Send + Sync {
     /// Run the operation against `ctx` with `req`.
     async fn run(&self, ctx: &OperationCtx<'_>, req: &OperationRequest)
     -> Result<OperationOutcome>;
+
+    /// Where this request belongs according to its own `params`, for an
+    /// operation whose target names no file — a call-hierarchy item, say, which
+    /// carries the URI of the file it lives in.
+    ///
+    /// The route reads only the parameters, so every registration under one
+    /// operation id answers alike; dispatch may ask any of them.
+    fn route(&self, _params: &Value) -> LanguageRoute {
+        LanguageRoute::Unspecified
+    }
+}
+
+/// Where an operation's own parameters say a request belongs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LanguageRoute {
+    /// The parameters name no language: the target, or the project's languages,
+    /// decide who serves the request.
+    Unspecified,
+    /// The request belongs to this language's backend.
+    Language(Language),
+    /// The parameters carry a handle issued by one backend — a call-hierarchy
+    /// item, say — that Henka cannot place. Handing such a handle to every
+    /// language would ask backends that cannot read it, so it is reported as
+    /// unplaceable, naming the handle, rather than guessed at.
+    Unplaceable(String),
+}
+
+impl LanguageRoute {
+    /// The language the parameters named, if they named one.
+    pub fn language(&self) -> Option<Language> {
+        match self {
+            LanguageRoute::Language(language) => Some(*language),
+            _ => None,
+        }
+    }
 }
 
 /// A registered operation paired with its (cached) descriptor.
@@ -206,17 +241,33 @@ impl OperationRegistry {
         out
     }
 
-    /// Resolve the operation with `id` applicable to one of `languages`.
+    /// Resolve the operation with `id` that serves `language`.
+    ///
+    /// Providers register their own operations under shared ids, so an id alone
+    /// does not identify one: only the operation registered for the language
+    /// whose session will run it can be handed that session.
     ///
     /// Fails if no registered operation matches, which is reported to clients
     /// as the operation being unavailable for the project.
-    pub fn resolve(&self, id: &str, languages: &[Language]) -> Result<Arc<dyn Operation>> {
+    pub fn resolve(&self, id: &str, language: Language) -> Result<Arc<dyn Operation>> {
         self.operations
             .iter()
-            .find(|r| {
-                r.descriptor.id == id && languages.iter().any(|&l| r.descriptor.applies_to(l))
-            })
+            .find(|r| r.descriptor.id == id && r.descriptor.applies_to(language))
             .map(|r| Arc::clone(&r.operation))
             .ok_or_else(|| Error::OperationNotAvailable(id.to_string()))
+    }
+
+    /// Which of `languages` register an operation under `id`, in the order
+    /// given. Empty when the id is unknown to all of them.
+    pub fn languages_for(&self, id: &str, languages: &[Language]) -> Vec<Language> {
+        languages
+            .iter()
+            .copied()
+            .filter(|&l| {
+                self.operations
+                    .iter()
+                    .any(|r| r.descriptor.id == id && r.descriptor.applies_to(l))
+            })
+            .collect()
     }
 }

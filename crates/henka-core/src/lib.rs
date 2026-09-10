@@ -21,7 +21,7 @@ pub use edit::{
 pub use error::{Error, Result};
 pub use language::{Language, detect_languages};
 pub use operation::{
-    Operation, OperationCtx, OperationDescriptor, OperationKind, OperationOutcome,
+    LanguageRoute, Operation, OperationCtx, OperationDescriptor, OperationKind, OperationOutcome,
     OperationRegistry, OperationRequest, Target, TargetKind,
 };
 pub use project::{Project, validate_project_id};
